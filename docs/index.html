@@ -2042,10 +2042,16 @@ function animate(now){
 /* ==================================== kick off ===================================== */
 rebuildWorld(params.seed);
 fitShadow();
-/* Start: top-down overview so trees are visible as the default viewpoint. */
-camera.position.set(0, 220, 0.1);                            // high overhead
-controls.target.set(0, 12, 0);                                // look toward the canopy/trees
-controls.update();
+/* Start: helicopter/sparrow viewpoint — around 3/4 of max tree height, forward-looking */
+{
+  const sx = 12, sz = -20;
+  const groundY = heightFn(sx, sz);
+  // camera floats at ~75% of the tallest tree height above local ground
+  camera.position.set(sx, groundY + Math.max(6, 0.75 * HMAX), sz + 10);
+  // look slightly down and forward toward the canopy
+  controls.target.set(sx + 10, groundY + Math.max(2, 0.35 * HMAX), sz - 10);
+  controls.update();
+}
 weather.set('Clear');
 requestAnimationFrame((t) => { prev = t; animate(t); });
 </script>
