@@ -1906,14 +1906,14 @@ composer.addPass(new OutputPass());     // applies tone mapping + sRGB conversio
 
 /* ===================================== GUI ========================================= */
 const params = {
-  timeOfDay: 16.2,        // low late-afternoon sun filtered through dense canopy
+  timeOfDay: 6.3,         // start near sunrise
   weather: 'Clear',
   autoCycle: true,
   wind: 1.0,              // multiplier on the weather wind value
-  mist: 0.70,             // baseline forest mist added to the aerial fog
+  mist: 0.0,              // baseline forest mist added to the aerial fog
   seed: 1337,
   ssao: Q.sao,
-  bloom: 0.35,
+  bloom: 0.0,
   regenerate(){ rebuildWorld(Math.floor(params.seed)); fitShadow(); }
 };
 const gui = new GUI({ title: 'World' });
@@ -1928,6 +1928,9 @@ gui.add(params, 'seed', 1, 999999, 1).name('Seed');
 gui.add(params, 'regenerate').name('Regenerate world');
 gui.add(params, 'ssao').name('SSAO').onChange(v => { saoPass.enabled = v && Q.sao !== false; });
 gui.add(params, 'bloom', 0, 1.5, 0.01).name('Bloom').onChange(v => { bloomPass.strength = v; });
+
+// ensure bloomPass strength matches the initial params value
+bloomPass.strength = params.bloom;
 
 /* ================================ sun / sky update ================================= */
 const _sunDir = new THREE.Vector3();
@@ -2039,10 +2042,9 @@ function animate(now){
 /* ==================================== kick off ===================================== */
 rebuildWorld(params.seed);
 fitShadow();
-/* CINEMATIC START: low inside the rainforest, near a massive trunk and under canopy.
-   The target looks through layered undergrowth instead of over the landscape. */
-camera.position.set(-5.5, heightFn(-5.5, 11) + 2.15, 11);
-controls.target.set(-27, heightFn(-27, -45) + 3.2, -45);
+/* Start: top-down overview so trees are visible as the default viewpoint. */
+camera.position.set(0, 220, 0.1);                            // high overhead
+controls.target.set(0, 12, 0);                                // look toward the canopy/trees
 controls.update();
 weather.set('Clear');
 requestAnimationFrame((t) => { prev = t; animate(t); });
