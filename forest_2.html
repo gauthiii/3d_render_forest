@@ -1,0 +1,1518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Procedural Worldscape — Three.js</title>
+<style>
+  html, body { margin:0; height:100%; overflow:hidden; background:#0a0e14;
+               font-family:ui-monospace, Menlo, Consolas, monospace; }
+  #app { position:fixed; inset:0; }
+  #fps { position:fixed; left:10px; top:10px; color:#cfe8ff; z-index:10;
+         background:rgba(8,12,20,.55); padding:4px 9px; border-radius:6px;
+         font-size:12px; pointer-events:none; letter-spacing:.5px; }
+  #msg { position:fixed; inset:0; display:none; place-items:center; color:#fff;
+         background:#101418; z-index:20; text-align:center; padding:24px;
+         font-size:15px; line-height:1.6; }
+</style>
+<!-- [P1] ES-module imports via import map -> jsdelivr CDN (no deprecated examples/js builds) -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+    "lil-gui": "https://cdn.jsdelivr.net/npm/lil-gui@0.19.2/dist/lil-gui.esm.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="app"></div>
+<div id="fps">-- fps</div>
+<div id="msg"><div>WebGL context lost.<br/>Please reload the page to restore the scene.</div></div>
+
+<script type="module">
+/* =====================================================================================
+   PROCEDURAL WORLDSCAPE — single-file Three.js scene, zero external assets.
+   Terrain (FBM + domain warp), 200k+ instanced grass with GPU wind, procedural trees
+   with fake leaf SSS, noise-displaced rocks, Preetham atmospheric sky with aerial
+   perspective fog, drifting procedural clouds, boids birds, dynamic weather machine
+   (Clear -> Cloudy -> Rain -> Storm) with GPU rain + lightning, SSAO + bloom + ACES.
+
+   Known-problem mitigations are tagged [P1]..[P16] matching the build brief.
+   ===================================================================================== */
+import * as THREE from 'three';
+import { OrbitControls }   from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer }  from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass }      from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { SAOPass }         from 'three/addons/postprocessing/SAOPass.js';
+import { OutputPass }      from 'three/addons/postprocessing/OutputPass.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import GUI from 'lil-gui';
+
+/* ============================== small math utilities =============================== */
+const clamp01 = (x) => Math.min(1, Math.max(0, x));
+const clampN  = (x, a, b) => Math.min(b, Math.max(a, x));
+const lerpN   = (a, b, t) => a + (b - a) * t;
+const smoothstepJS = (e0, e1, x) => { const t = clamp01((x - e0) / (e1 - e0)); return t * t * (3 - 2 * t); };
+
+/* [P16] Seeded PRNG (mulberry32) so the whole world is reproducible from one seed. */
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* Seeded simplex noise (Gustavson reference implementation, 2D + 3D).
+   The SAME JS noise drives terrain heights AND instance placement, so nothing
+   floats or sinks. [P3] */
+class SimplexNoise {
+  constructor(rand = Math.random) {
+    this.grad3 = [[1,1,0],[-1,1,0],[1,-1,0],[-1,-1,0],
+                  [1,0,1],[-1,0,1],[1,0,-1],[-1,0,-1],
+                  [0,1,1],[0,-1,1],[0,1,-1],[0,-1,-1]];
+    const p = new Uint8Array(256);
+    for (let i = 0; i < 256; i++) p[i] = i;
+    for (let i = 255; i > 0; i--) {              // Fisher-Yates with the seeded PRNG
+      const j = Math.floor(rand() * (i + 1));
+      const t = p[i]; p[i] = p[j]; p[j] = t;
+    }
+    this.perm = new Uint8Array(512);
+    this.permMod12 = new Uint8Array(512);
+    for (let i = 0; i < 512; i++) {
+      this.perm[i] = p[i & 255];
+      this.permMod12[i] = this.perm[i] % 12;
+    }
+  }
+  noise2D(xin, yin) {
+    const F2 = 0.5 * (Math.sqrt(3) - 1), G2 = (3 - Math.sqrt(3)) / 6;
+    const s = (xin + yin) * F2;
+    const i = Math.floor(xin + s), j = Math.floor(yin + s);
+    const t = (i + j) * G2;
+    const x0 = xin - (i - t), y0 = yin - (j - t);
+    const i1 = x0 > y0 ? 1 : 0, j1 = x0 > y0 ? 0 : 1;
+    const x1 = x0 - i1 + G2,  y1 = y0 - j1 + G2;
+    const x2 = x0 - 1 + 2*G2, y2 = y0 - 1 + 2*G2;
+    const ii = i & 255, jj = j & 255;
+    let n0 = 0, n1 = 0, n2 = 0;
+    let t0 = 0.5 - x0*x0 - y0*y0;
+    if (t0 >= 0) { const gi = this.permMod12[ii + this.perm[jj]]; t0 *= t0;
+      n0 = t0 * t0 * (this.grad3[gi][0]*x0 + this.grad3[gi][1]*y0); }
+    let t1 = 0.5 - x1*x1 - y1*y1;
+    if (t1 >= 0) { const gi = this.permMod12[ii + i1 + this.perm[jj + j1]]; t1 *= t1;
+      n1 = t1 * t1 * (this.grad3[gi][0]*x1 + this.grad3[gi][1]*y1); }
+    let t2 = 0.5 - x2*x2 - y2*y2;
+    if (t2 >= 0) { const gi = this.permMod12[ii + 1 + this.perm[jj + 1]]; t2 *= t2;
+      n2 = t2 * t2 * (this.grad3[gi][0]*x2 + this.grad3[gi][1]*y2); }
+    return 70 * (n0 + n1 + n2);          // scaled to roughly [-1, 1]
+  }
+  noise3D(xin, yin, zin) {
+    const F3 = 1/3, G3 = 1/6;
+    const s = (xin + yin + zin) * F3;
+    const i = Math.floor(xin + s), j = Math.floor(yin + s), k = Math.floor(zin + s);
+    const t = (i + j + k) * G3;
+    const x0 = xin - (i - t), y0 = yin - (j - t), z0 = zin - (k - t);
+    let i1, j1, k1, i2, j2, k2;
+    if (x0 >= y0) {
+      if (y0 >= z0)      { i1=1; j1=0; k1=0; i2=1; j2=1; k2=0; }
+      else if (x0 >= z0) { i1=1; j1=0; k1=0; i2=1; j2=0; k2=1; }
+      else               { i1=0; j1=0; k1=1; i2=1; j2=0; k2=1; }
+    } else {
+      if (y0 < z0)       { i1=0; j1=0; k1=1; i2=0; j2=1; k2=1; }
+      else if (x0 < z0)  { i1=0; j1=1; k1=0; i2=0; j2=1; k2=1; }
+      else               { i1=0; j1=1; k1=0; i2=1; j2=1; k2=0; }
+    }
+    const x1 = x0-i1+G3,   y1 = y0-j1+G3,   z1 = z0-k1+G3;
+    const x2 = x0-i2+2*G3, y2 = y0-j2+2*G3, z2 = z0-k2+2*G3;
+    const x3 = x0-1+3*G3,  y3 = y0-1+3*G3,  z3 = z0-1+3*G3;
+    const ii = i & 255, jj = j & 255, kk = k & 255;
+    let n = 0;
+    let t0 = 0.6 - x0*x0 - y0*y0 - z0*z0;
+    if (t0 >= 0) { const gi = this.permMod12[ii + this.perm[jj + this.perm[kk]]]; t0 *= t0;
+      n += t0 * t0 * (this.grad3[gi][0]*x0 + this.grad3[gi][1]*y0 + this.grad3[gi][2]*z0); }
+    let t1 = 0.6 - x1*x1 - y1*y1 - z1*z1;
+    if (t1 >= 0) { const gi = this.permMod12[ii + i1 + this.perm[jj + j1 + this.perm[kk + k1]]]; t1 *= t1;
+      n += t1 * t1 * (this.grad3[gi][0]*x1 + this.grad3[gi][1]*y1 + this.grad3[gi][2]*z1); }
+    let t2 = 0.6 - x2*x2 - y2*y2 - z2*z2;
+    if (t2 >= 0) { const gi = this.permMod12[ii + i2 + this.perm[jj + j2 + this.perm[kk + k2]]]; t2 *= t2;
+      n += t2 * t2 * (this.grad3[gi][0]*x2 + this.grad3[gi][1]*y2 + this.grad3[gi][2]*z2); }
+    let t3 = 0.6 - x3*x3 - y3*y3 - z3*z3;
+    if (t3 >= 0) { const gi = this.permMod12[ii + 1 + this.perm[jj + 1 + this.perm[kk + 1]]]; t3 *= t3;
+      n += t3 * t3 * (this.grad3[gi][0]*x3 + this.grad3[gi][1]*y3 + this.grad3[gi][2]*z3); }
+    return 32 * n;                       // scaled to roughly [-1, 1]
+  }
+}
+
+/* ============================== quality / capability =============================== */
+/* [P13] Detect WebGL2 and degrade gracefully; handle context loss further below. */
+const HAS_WEBGL2 = (() => {
+  try { return !!document.createElement('canvas').getContext('webgl2'); }
+  catch (e) { return false; }
+})();
+
+const Q = HAS_WEBGL2
+  ? { terrainSeg: 512, grass: 220000, trees: 220, rocks: 160, birds: 44, flowers: 1100,
+      rain: 3500, sao: true,  pixelRatio: Math.min(window.devicePixelRatio, 2) } // [P2] cap DPR
+  : { terrainSeg: 256, grass: 60000,  trees: 120, rocks: 90,  birds: 28, flowers: 350,
+      rain: 1200, sao: false, pixelRatio: 1 };
+
+/* World scale constants */
+const TERRAIN_SIZE   = 1200;  // metres across the whole ground plane
+const GRASS_EXTENT   = 250;   // grass lives within this half-extent of the origin
+const GRASS_FULL_R   = 140;   // full grass density inside this radius...
+const GRASS_FADE_R   = 250;   // ...fading to zero by this radius (distance falloff) [P2]
+const GRASS_CHUNKS   = 6;     // 6x6 chunk grid -> per-chunk frustum culling [P2]
+const TREE_EXTENT    = 470;   // trees/rocks scatter within this half-extent
+const WATER_LEVEL    = 2.0;   // lowland threshold: no grass/trees below this height
+
+/* ================================ shared shader state =============================== */
+/* One uniforms object shared BY REFERENCE into every patched material, so updating a
+   value here updates every shader in the scene simultaneously. [P11] all-floats. */
+const U = {
+  uTime:         { value: 0 },                                  // seconds since start
+  uWindStrength: { value: 0.55 },                               // sway amplitude scalar
+  uWindDir:      { value: new THREE.Vector2(0.8, 0.6).normalize() }, // XZ wind direction
+  uSunDirW:      { value: new THREE.Vector3(0, 1, 0) },         // sun dir, WORLD space
+  uSunDirV:      { value: new THREE.Vector3(0, 1, 0) },         // sun dir, VIEW space (for SSS)
+  uHorizonColor: { value: new THREE.Color(0.62, 0.71, 0.85) },  // aerial-fog base colour
+  uSunHazeColor: { value: new THREE.Color(1.0, 0.85, 0.6) },    // fog tint toward the sun
+  uFogDensity:   { value: 0.0010 },                             // aerial extinction coeff
+  uWetness:      { value: 0 },                                  // 0 dry .. 1 soaked [rain]
+  uSunI:         { value: 1 }                                   // current sun intensity 0..1
+};
+
+/* ----------------------------- GLSL: tiny noise library ---------------------------- */
+/* Cheap value-noise + fbm used inside fragment shaders for splatting / detail.
+   (The expensive simplex runs on CPU only; in-shader we keep it light.) */
+const GLSL_NOISE = /* glsl */`
+  float hash12g(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+  float gnoise(vec2 p){
+    vec2 i = floor(p), f = fract(p);
+    vec2 u = f*f*(3.0-2.0*f);                       // smooth interpolation
+    return mix(mix(hash12g(i),               hash12g(i+vec2(1,0)), u.x),
+               mix(hash12g(i+vec2(0,1)),     hash12g(i+vec2(1,1)), u.x), u.y);
+  }
+  float gfbm(vec2 p){                                // 4-octave fbm, amplitude halves
+    float v = 0.0, a = 0.5;
+    for (int i = 0; i < 4; i++){ v += a*gnoise(p); p *= 2.03; a *= 0.5; }
+    return v;
+  }
+`;
+
+/* ------------------------ GLSL: scattering-based aerial fog ------------------------ */
+/* [P7] Custom fog applied manually in EVERY material so the scene fogs consistently.
+   Density rises with distance; fog colour blends horizon -> sun-haze when looking
+   sunward (cheap aerial perspective derived from the same sun state as the sky). */
+const GLSL_FOG = /* glsl */`
+  uniform vec3  uHorizonColor;
+  uniform vec3  uSunHazeColor;
+  uniform float uFogDensity;
+  uniform vec3  uSunDirW;
+  vec3 applyAerialFog(vec3 col, vec3 worldPos){
+    vec3  toFrag = worldPos - cameraPosition;
+    float dist   = length(toFrag);
+    vec3  vdir   = toFrag / max(dist, 1e-4);
+    /* extinction: 1 - e^(-(d*density)^1.3); exponent >1 keeps near field clear */
+    float f = 1.0 - exp(-pow(dist * uFogDensity, 1.30));
+    f *= 1.0 - 0.55 * clamp(vdir.y, 0.0, 1.0);       // thinner fog looking upward
+    float sunDot = clamp(dot(vdir, uSunDirW), 0.0, 1.0);
+    vec3 fogCol  = mix(uHorizonColor, uSunHazeColor, pow(sunDot, 6.0)); // sun glow in haze
+    return mix(col, fogCol, clamp(f, 0.0, 1.0));
+  }
+`;
+
+/* ----------------------- GLSL: terrain splat + procedural detail ------------------- */
+/* Replaces <map_fragment>. Blends grass/dirt/rock/peak by height+slope, with
+   two-UV-scale anti-tiling blend and macro variation noise. [Section "Ground Detail"] */
+const SPLAT_GLSL = /* glsl */`
+{
+  /* world-space inputs prepared in the vertex stage */
+  vec3  wp     = vAerialWorldPos;
+  float h      = wp.y;                               // terrain height (metres)
+  float slope  = 1.0 - clamp(vWorldNormal.y, 0.0, 1.0); // 0 flat .. 1 vertical
+
+  /* --- anti-tiling detail: same fbm at two scales blended by a noise mask --- */
+  float mask  = gnoise(wp.xz * 0.013);               // low-freq blend mask
+  float dA    = gfbm(wp.xz * 0.35);                  // fine detail
+  float dB    = gfbm(wp.xz * 0.071 + 17.0);          // coarse detail
+  float det   = mix(dA, dB, mask);                   // anti-tiled detail value
+  float macro = gnoise(wp.xz * 0.004) * 0.30 + 0.85; // large-scale brightness variation
+
+  /* --- splat palette (albedo only; lighting comes from MeshStandardMaterial) --- */
+  vec3 grassC = mix(vec3(0.14, 0.32, 0.07), vec3(0.33, 0.50, 0.14), det);
+  vec3 dirtC  = mix(vec3(0.23, 0.16, 0.10), vec3(0.36, 0.27, 0.17), det);
+  vec3 rockC  = mix(vec3(0.28, 0.27, 0.26), vec3(0.46, 0.44, 0.42), det);
+  vec3 peakC  = mix(vec3(0.55, 0.55, 0.56), vec3(0.78, 0.78, 0.80), det);
+
+  /* height/slope weights: grass on low flats, dirt then rock on slopes, peak high up */
+  float wRock = smoothstep(0.28, 0.55, slope);
+  float wDirt = smoothstep(0.12, 0.30, slope) * (1.0 - wRock);
+  float wPeak = smoothstep(34.0, 48.0, h) * (1.0 - wRock * 0.4);
+  vec3 col = grassC;
+  col = mix(col, dirtC, wDirt);
+  col = mix(col, rockC, wRock);
+  col = mix(col, peakC, wPeak);
+
+  /* forest-floor litter patches on the flats: warm brown duff like a real woodland */
+  vec3 litterC = mix(vec3(0.26, 0.17, 0.09), vec3(0.43, 0.31, 0.17), det);
+  float wLit = smoothstep(0.45, 0.80, gnoise(wp.xz * 0.022 + 7.0))
+             * (1.0 - wRock) * (1.0 - wPeak) * smoothstep(0.30, 0.10, slope);
+  col = mix(col, litterC, wLit * 0.85);
+
+  /* wet ground: darker albedo while raining [weather] */
+  col *= mix(1.0, 0.55, uWetness);
+  diffuseColor.rgb *= col * macro;
+}
+`;
+
+/* Replaces <normal_fragment_maps>: perturb the normal from screen-space derivatives of
+   a procedural height value -> bumpy ground without any downloaded normal map. */
+const BUMP_GLSL = /* glsl */`
+{
+  float bh   = gfbm(vAerialWorldPos.xz * 0.5) * 0.45;   // procedural micro-height
+  vec3  dpx  = dFdx(-vViewPosition);                    // surface derivatives
+  vec3  dpy  = dFdy(-vViewPosition);
+  float dhx  = dFdx(bh);
+  float dhy  = dFdy(bh);
+  vec3 r1 = cross(dpy, normal);
+  vec3 r2 = cross(normal, dpx);
+  float det = dot(dpx, r1);
+  vec3 grad = sign(det) * (dhx * r1 + dhy * r2);
+  normal = normalize(abs(det) * normal - grad);         // perturbed shading normal
+}
+`;
+
+/* ------------------------------- patchMaterial helper ------------------------------ */
+/* [P8] Inject wind / SSS / splat / aerial-fog into MeshStandardMaterial (or Basic) via
+   onBeforeCompile, keeping Three's built-in lighting, shadows and instancing intact.
+   opts: { key, windCode, splat, bump, sss:{distort,power,thick,tint}, grassFade,
+           birdFlap, terrainNormal } */
+function patchMaterial(mat, opts){
+  mat.onBeforeCompile = (shader) => {
+    /* share the global uniforms BY REFERENCE */
+    for (const k in U) shader.uniforms[k] = U[k];
+
+    /* ---------------- vertex stage ---------------- */
+    let vDecl = `
+      uniform float uTime;
+      uniform float uWindStrength;
+      uniform vec2  uWindDir;
+      varying vec3  vAerialWorldPos;`;
+    if (opts.terrainNormal) vDecl += `\n varying vec3 vWorldNormal;`;
+    if (opts.grassFade)     vDecl += `\n varying float vGrassY;`;
+    if (opts.birdFlap)      vDecl += `\n attribute float aPhase;`;
+    vDecl += GLSL_NOISE;
+
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', vDecl + '\n#include <common>');
+
+    /* per-vertex tweaks done in object space before projection */
+    let beginAppend = '';
+    if (opts.grassFade) beginAppend += `
+      vGrassY = clamp(position.y, 0.0, 1.0);          // 0 at root, 1 at tip`;
+    if (opts.birdFlap) beginAppend += `
+      /* sine wing flap, amplitude grows toward the wingtip (|x|) */
+      transformed.y += sin(uTime * 10.0 + aPhase) * pow(abs(position.x), 1.4) * 0.6;
+      transformed.y += sin(uTime * 1.7 + aPhase) * 0.15;  // gentle body bob`;
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <begin_vertex>',
+               '#include <begin_vertex>' + beginAppend);
+
+    /* custom projection: compute the WORLD position (incl. instance matrix), apply any
+       world-space wind offset, expose it to the fragment stage for fog/splat. */
+    const windCode = opts.windCode || '';
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <project_vertex>', `
+      vec4 awp = vec4(transformed, 1.0);
+      #ifdef USE_INSTANCING
+        awp = instanceMatrix * awp;
+        vec3 ibase = (instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz; // instance origin
+      #else
+        vec3 ibase = vec3(0.0);
+      #endif
+      awp = modelMatrix * awp;
+      ${windCode}
+      vAerialWorldPos = awp.xyz;
+      vec4 mvPosition = viewMatrix * awp;
+      gl_Position = projectionMatrix * mvPosition;`);
+
+    if (opts.terrainNormal) shader.vertexShader = shader.vertexShader.replace(
+      '#include <defaultnormal_vertex>', `
+      #include <defaultnormal_vertex>
+      vWorldNormal = normalize(mat3(modelMatrix) * objectNormal);`);
+
+    /* ---------------- fragment stage ---------------- */
+    let fDecl = `
+      uniform float uTime;
+      uniform float uWetness;
+      uniform vec3  uSunDirV;
+      uniform float uSunI;
+      varying vec3  vAerialWorldPos;`;
+    if (opts.terrainNormal) fDecl += `\n varying vec3 vWorldNormal;`;
+    if (opts.grassFade)     fDecl += `\n varying float vGrassY;`;
+    fDecl += GLSL_NOISE + GLSL_FOG;
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', fDecl + '\n#include <common>');
+
+    if (opts.splat) shader.fragmentShader = shader.fragmentShader
+      .replace('#include <map_fragment>', SPLAT_GLSL);
+
+    if (opts.bump) shader.fragmentShader = shader.fragmentShader
+      .replace('#include <normal_fragment_maps>', BUMP_GLSL);
+
+    /* wet ground -> lower roughness (specular sheen) during rain */
+    if (opts.splat) shader.fragmentShader = shader.fragmentShader
+      .replace('#include <roughnessmap_fragment>', `
+        #include <roughnessmap_fragment>
+        roughnessFactor = mix(roughnessFactor, 0.28, uWetness);`);
+
+    /* grass blades: darken toward the root for cheap self-occlusion */
+    if (opts.grassFade) shader.fragmentShader = shader.fragmentShader
+      .replace('#include <color_fragment>', `
+        #include <color_fragment>
+        diffuseColor.rgb *= mix(0.45, 1.08, vGrassY);`);
+
+    /* fake subsurface scattering: wrap light + view-aligned back translucency,
+       glows warm green-yellow when the sun is behind the foliage. */
+    if (opts.sss){
+      const s = opts.sss;
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <opaque_fragment>', `
+        {
+          vec3 V = normalize(vViewPosition);                       // frag -> camera (view space)
+          vec3 L = normalize(uSunDirV);                            // frag -> sun
+          vec3 sssH   = normalize(-L + normal * ${s.distort});
+          float trans = pow(clamp(dot(V, sssH), 0.0, 1.0), ${s.power}) * ${s.thick};
+          float wrap  = clamp((dot(normal, L) + 0.5) / 1.5, 0.0, 1.0) * 0.25;
+          vec3 sssTint = vec3(${s.tint});
+          outgoingLight += (trans + wrap) * sssTint * uSunI;
+        }
+        #include <opaque_fragment>`);
+    }
+
+    /* [P7] manual aerial fog LAST so it sits on top of all shading */
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <fog_fragment>',
+               'gl_FragColor.rgb = applyAerialFog(gl_FragColor.rgb, vAerialWorldPos);');
+  };
+  /* unique program per patch variant (otherwise Three reuses the wrong shader) */
+  mat.customProgramCacheKey = () => 'patched_' + opts.key;
+  return mat;
+}
+
+/* ================================== sky dome ======================================= */
+/* Preetham-style Rayleigh + Mie scattering, inlined & customised: night-side blend,
+   procedural stars, and screen-space dithering against banding. [P12] */
+const SKY_VERT = /* glsl */`
+  uniform vec3  uSunPos;
+  uniform float uRayleigh;
+  uniform float uTurbidity;
+  uniform float uMieCoefficient;
+  varying vec3  vWorldDir;
+  varying vec3  vSunDirection;
+  varying float vSunfade;
+  varying vec3  vBetaR;
+  varying vec3  vBetaM;
+  varying float vSunE;
+
+  const vec3 up = vec3(0.0, 1.0, 0.0);
+  const float e  = 2.71828182845904523536028747135266249775724709369995957;
+  /* wavelength-dependent total Rayleigh scattering coefficient (precomputed) */
+  const vec3 totalRayleigh = vec3(5.804542996261093E-6, 1.3562911419845635E-5, 3.0265902468824876E-5);
+  /* Mie K coefficient * 0.434 (precomputed for wavelengths 680/550/450nm) */
+  const vec3 MieConst = vec3(1.8399918514433978E14, 2.7798023919660528E14, 4.0790479543861094E14);
+  /* sun intensity falloff as it approaches the horizon */
+  const float cutoffAngle = 1.6110731556870734;     // pi/1.95
+  const float steepness   = 1.5;
+  const float EE          = 1000.0;                 // sun illuminance constant
+
+  float sunIntensity(float zenithAngleCos){
+    zenithAngleCos = clamp(zenithAngleCos, -1.0, 1.0);
+    return EE * max(0.0, 1.0 - pow(e, -((cutoffAngle - acos(zenithAngleCos)) / steepness)));
+  }
+  vec3 totalMie(float T){
+    float c = (0.2 * T) * 10E-18;
+    return 0.434 * c * MieConst;
+  }
+  void main(){
+    vec4 wp = modelMatrix * vec4(position, 1.0);
+    vWorldDir = normalize(wp.xyz - cameraPosition);
+    vSunDirection = normalize(uSunPos);
+    vSunE    = sunIntensity(dot(vSunDirection, up));
+    vSunfade = 1.0 - clamp(1.0 - exp((uSunPos.y / 450000.0)), 0.0, 1.0);
+    float rayleighCoefficient = uRayleigh - (1.0 * (1.0 - vSunfade));
+    vBetaR = totalRayleigh * rayleighCoefficient;   // Rayleigh extinction
+    vBetaM = totalMie(uTurbidity) * uMieCoefficient;// Mie extinction
+    gl_Position = projectionMatrix * viewMatrix * wp;
+    gl_Position.z = gl_Position.w;                  // force depth = far plane
+  }
+`;
+
+const SKY_FRAG = /* glsl */`
+  uniform float uMieG;
+  uniform float uStarVis;       // 0..1 procedural star visibility (night, clear sky)
+  uniform float uTime;
+  varying vec3  vWorldDir;
+  varying vec3  vSunDirection;
+  varying float vSunfade;
+  varying vec3  vBetaR;
+  varying vec3  vBetaM;
+  varying float vSunE;
+
+  const vec3 up = vec3(0.0, 1.0, 0.0);
+  const float pi = 3.141592653589793238462643383279502884197169;
+  const float rayleighZenithLength = 8.4E3;     // atmosphere depth for Rayleigh
+  const float mieZenithLength     = 1.25E3;     // atmosphere depth for Mie
+  const float sunAngularDiameterCos = 0.999956676946448443553574619906976478926848692873900859324;
+  const float THREE_OVER_SIXTEENPI = 0.05968310365946075;
+  const float ONE_OVER_FOURPI      = 0.07957747154594767;
+
+  float rayleighPhase(float cosTheta){
+    return THREE_OVER_SIXTEENPI * (1.0 + pow(cosTheta, 2.0));
+  }
+  float hgPhase(float cosTheta, float g){
+    float g2 = pow(g, 2.0);
+    float inverse = 1.0 / pow(1.0 - 2.0 * g * cosTheta + g2, 1.5);
+    return ONE_OVER_FOURPI * ((1.0 - g2) * inverse);
+  }
+  float hash12s(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+
+  void main(){
+    vec3 direction = normalize(vWorldDir);
+
+    /* optical length scaled by zenith angle (flat-earth approximation) */
+    float zenithAngle = acos(max(0.0, dot(up, direction)));
+    float inverse = 1.0 / (cos(zenithAngle) + 0.15 * pow(93.885 - ((zenithAngle * 180.0) / pi), -1.253));
+    float sR = rayleighZenithLength * inverse;
+    float sM = mieZenithLength * inverse;
+
+    /* combined extinction */
+    vec3 Fex = exp(-(vBetaR * sR + vBetaM * sM));
+
+    /* in-scattering */
+    float cosTheta = dot(direction, vSunDirection);
+    float rPhase = rayleighPhase(cosTheta * 0.5 + 0.5);
+    vec3 betaRTheta = vBetaR * rPhase;
+    float mPhase = hgPhase(cosTheta, uMieG);
+    vec3 betaMTheta = vBetaM * mPhase;
+    vec3 Lin = pow(vSunE * ((betaRTheta + betaMTheta) / (vBetaR + vBetaM)) * (1.0 - Fex), vec3(1.5));
+    Lin *= mix(vec3(1.0),
+               pow(vSunE * ((betaRTheta + betaMTheta) / (vBetaR + vBetaM)) * Fex, vec3(0.5)),
+               clamp(pow(1.0 - dot(up, vSunDirection), 5.0), 0.0, 1.0));
+
+    /* sun disc */
+    vec3 L0 = vec3(0.1) * Fex;
+    float sundisk = smoothstep(sunAngularDiameterCos, sunAngularDiameterCos + 0.00002, cosTheta);
+    L0 += (vSunE * 19000.0 * Fex) * sundisk;
+
+    vec3 texColor = (Lin + L0) * 0.04 + vec3(0.0, 0.0003, 0.00075);
+    vec3 retColor = pow(texColor, vec3(1.0 / (1.2 + (1.2 * vSunfade))));
+
+    /* ---- procedural night sky: stars on a hash grid, twinkling ---- */
+    if (uStarVis > 0.001 && direction.y > -0.05){
+      vec2 sp = direction.xz / (direction.y + 0.55);   // dome projection
+      vec2 cell = floor(sp * 42.0);
+      float star = hash12s(cell);
+      if (star > 0.92){
+        vec2 cuv = fract(sp * 42.0) - 0.5;
+        float d = length(cuv);
+        float tw = 0.75 + 0.25 * sin(uTime * (2.0 + star * 6.0) + star * 40.0); // twinkle
+        float s = smoothstep(0.10, 0.0, d) * (star - 0.92) / 0.08;
+        retColor += vec3(s * tw) * uStarVis;
+      }
+      /* faint blue night ambience so the dome never goes pure black */
+      retColor += vec3(0.012, 0.02, 0.045) * uStarVis * 0.6;
+    }
+
+    /* [P12] screen-space dithering: breaks gradient banding in the sky */
+    retColor += (hash12s(gl_FragCoord.xy) - 0.5) * (1.5 / 255.0);
+
+    gl_FragColor = vec4(retColor, 1.0);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
+  }
+`;
+
+/* ============================ renderer / scene / camera ============================ */
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Q.pixelRatio);                       // [P2] cap DPR
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;           // PCF-soft shadows
+renderer.toneMapping = THREE.ACESFilmicToneMapping;         // filmic tonemapping
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.getElementById('app').appendChild(renderer.domElement);
+
+const scene  = new THREE.Scene();
+/* [P6] near/far chosen to keep depth precision over a 1.2km terrain (no z-fighting) */
+const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.5, 2400);
+camera.position.set(70, 38, 95);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 16, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.minDistance = 20;
+controls.maxDistance = 300;
+controls.maxPolarAngle = 1.42;                              // no going underground
+let lastInteraction = 0;
+controls.addEventListener('start', () => { lastInteraction = performance.now(); });
+
+/* --------------------------------- lights ----------------------------------------- */
+const sunLight = new THREE.DirectionalLight(0xffffff, 3.4);
+sunLight.castShadow = true;
+/* [P4] tight ortho frustum + tuned bias to avoid acne and peter-panning */
+sunLight.shadow.mapSize.set(2048, 2048);
+sunLight.shadow.camera.left   = -180;
+sunLight.shadow.camera.right  =  180;
+sunLight.shadow.camera.top    =  180;
+sunLight.shadow.camera.bottom = -180;
+sunLight.shadow.camera.near   = 20;
+sunLight.shadow.camera.far    = 700;
+sunLight.shadow.bias       = -0.0002;
+sunLight.shadow.normalBias =  1.2;
+sunLight.shadow.radius     =  4;
+scene.add(sunLight, sunLight.target);
+
+const hemiLight = new THREE.HemisphereLight(0xbfd8ff, 0x3a4a2a, 0.5);
+scene.add(hemiLight);
+
+/* dedicated light for lightning flashes (Storm) — pre-allocated, intensity-driven */
+const lightningLight = new THREE.DirectionalLight(0xcfd8ff, 0);
+lightningLight.position.set(120, 300, -80);
+scene.add(lightningLight, lightningLight.target);
+
+/* ============================== terrain height field =============================== */
+let simplex, rng;                       // (re)seeded by rebuildWorld
+function initNoise(seed){
+  rng = mulberry32(seed);               // [P16] reproducible world
+  simplex = new SimplexNoise(mulberry32(seed ^ 0x9e3779b9));
+}
+
+/* [P3] SINGLE source of truth for terrain height — used by the mesh AND by every
+   CPU placement routine (grass/trees/rocks), so nothing floats or sinks. */
+function heightFn(x, z){
+  /* domain warping: offset the sample position by low-frequency noise -> natural ridges */
+  const wx = x + simplex.noise2D(x * 0.003 + 31.7, z * 0.003) * 90;
+  const wz = z + simplex.noise2D(x * 0.003, z * 0.003 - 12.3) * 90;
+
+  /* 6-octave FBM base */
+  let amp = 1, freq = 0.004, h = 0, norm = 0;
+  for (let o = 0; o < 6; o++){
+    h += simplex.noise2D(wx * freq, wz * freq) * amp;
+    norm += amp; amp *= 0.5; freq *= 2.0;
+  }
+  h /= norm;
+  let base = h * 16 + 8;                               // rolling hills, ~ -8..24m
+
+  /* ridged term, masked to one or two dramatic ridgelines */
+  const rn   = simplex.noise2D(wx * 0.0042 + 100, wz * 0.0042 - 100);
+  const ridge = Math.pow(1 - Math.abs(rn), 3);
+  const mask  = smoothstepJS(0.25, 0.75, simplex.noise2D(x * 0.0011 - 50, z * 0.0011 + 50));
+  base += ridge * 46 * mask;                           // peaks up to ~70m
+
+  return base;
+}
+/* slope from central finite differences (cheap, good enough for placement/splat) */
+function slopeFn(x, z){
+  const e = 1.5;
+  const dx = heightFn(x + e, z) - heightFn(x - e, z);
+  const dz = heightFn(x, z + e) - heightFn(x, z - e);
+  return Math.min(1, Math.hypot(dx, dz) / (2 * e));
+}
+
+let HMAX = 70;                          // tracked max terrain height (birds fly above it)
+
+/* =================================== materials ===================================== */
+/* Shared, created ONCE; geometry is rebuilt on reseed but materials are reused. */
+const terrainMat = patchMaterial(
+  new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.95, metalness: 0.0 }),
+  { key: 'terrain', splat: true, bump: true, terrainNormal: true });
+
+const grassMat = patchMaterial(
+  new THREE.MeshStandardMaterial({ color: 0x6fae3c, roughness: 0.8, metalness: 0.0,
+                                   side: THREE.DoubleSide }),
+  { key: 'grass', grassFade: true,
+    /* wind: gusting noise field + travelling wave; amplitude grows with blade height² */
+    windCode: `
+      float hf   = clamp(transformed.y, 0.0, 1.2);
+      float gust = gnoise(ibase.xz * 0.05 + uWindDir * uTime * 0.85) - 0.5;
+      float wave = sin(uTime * 2.3 + dot(ibase.xz, uWindDir) * 0.25);
+      float amp  = uWindStrength * (0.20 + 0.16 * gust + 0.10 * wave) * hf * hf;
+      awp.x += uWindDir.x * amp;
+      awp.z += uWindDir.y * amp;
+      awp.y -= abs(amp) * 0.25;          // blades bow down slightly as they bend`,
+    sss: { distort: '0.30', power: '3.0', thick: '0.40', tint: '0.50, 0.68, 0.18' } });
+
+const trunkMat = patchMaterial(
+  new THREE.MeshStandardMaterial({ color: 0x6b4a2e, roughness: 0.95 }),
+  { key: 'trunk' });
+
+/* --------------------- runtime canvas textures: leaves & flowers ------------------- */
+/* A cluster of overlapping pointed-leaf shapes on a transparent canvas. Used as an
+   alphaTest cutout on foliage cards/cones -> feathery, realistic tree silhouettes,
+   still 100% procedural (zero downloaded assets). */
+function makeLeafTexture(){
+  const s = 256, cv = document.createElement('canvas');
+  cv.width = cv.height = s;
+  const ctx = cv.getContext('2d');
+  const lr = mulberry32(777);
+  for (let i = 0; i < 120; i++){
+    /* cluster: leaf density highest near the centre of the canvas */
+    const ang = lr() * Math.PI * 2;
+    const rad = Math.pow(lr(), 0.6) * s * 0.42;
+    const x = s/2 + Math.cos(ang) * rad;
+    const y = s/2 + Math.sin(ang) * rad;
+    const len = 11 + lr() * 17, wid = len * (0.32 + lr() * 0.2);
+    const hue = 86 + lr() * 44;                        // yellow-green .. deep green
+    const lig = 20 + lr() * 24;
+    ctx.save();
+    ctx.translate(x, y); ctx.rotate(lr() * Math.PI * 2);
+    ctx.fillStyle = `hsl(${hue} 46% ${lig}%)`;
+    ctx.beginPath();                                   // pointed leaf via two curves
+    ctx.moveTo(0, -len/2);
+    ctx.quadraticCurveTo( wid, 0, 0, len/2);
+    ctx.quadraticCurveTo(-wid, 0, 0, -len/2);
+    ctx.fill();
+    ctx.restore();
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = 4;
+  return tex;
+}
+/* tiny five-petal wildflower sprite */
+function makeFlowerTexture(){
+  const s = 64, cv = document.createElement('canvas');
+  cv.width = cv.height = s;
+  const ctx = cv.getContext('2d');
+  ctx.translate(s/2, s/2);
+  ctx.fillStyle = '#f5f2e8';
+  for (let i = 0; i < 5; i++){
+    ctx.save(); ctx.rotate(i / 5 * Math.PI * 2);
+    ctx.beginPath(); ctx.ellipse(0, -13, 7, 13, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+  ctx.fillStyle = '#e8c33a';
+  ctx.beginPath(); ctx.arc(0, 0, 6, 0, Math.PI * 2); ctx.fill();
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+const leafTex = makeLeafTexture();
+const flowerTex = makeFlowerTexture();
+
+/* foliage material: leaf-cluster cutout + SSS + wind shiver (both tree species) */
+const foliageMat = patchMaterial(
+  new THREE.MeshStandardMaterial({ map: leafTex, alphaTest: 0.45, roughness: 0.85,
+                                   side: THREE.DoubleSide, color: 0xffffff }),
+  { key: 'foliage',
+    windCode: `
+      float chf = clamp((transformed.y - 1.5) / 6.0, 0.0, 1.0);
+      float cg  = gnoise(ibase.xz * 0.05 + uWindDir * uTime * 0.7) - 0.5;
+      float ca  = uWindStrength * 0.26 * chf * (0.6 + cg);
+      awp.x += uWindDir.x * ca;
+      awp.z += uWindDir.y * ca;
+      awp.y += sin(uTime * 1.9 + ibase.x) * uWindStrength * 0.05 * chf;`,
+    sss: { distort: '0.42', power: '2.6', thick: '1.1', tint: '0.45, 0.62, 0.16' } });
+
+/* wildflower material: cutout sprite, gentle sway near the tip */
+const flowerMat = patchMaterial(
+  new THREE.MeshStandardMaterial({ map: flowerTex, alphaTest: 0.5, roughness: 0.9,
+                                   side: THREE.DoubleSide }),
+  { key: 'flower',
+    windCode: `
+      float fg = gnoise(ibase.xz * 0.05 + uWindDir * uTime * 0.85) - 0.5;
+      float fa = uWindStrength * 0.10 * clamp(transformed.y * 2.0, 0.0, 1.0) * (0.5 + fg);
+      awp.x += uWindDir.x * fa;
+      awp.z += uWindDir.y * fa;` });
+
+const rockMat = patchMaterial(
+  new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.93, flatShading: true }),
+  { key: 'rock' });
+
+/* ================================ world building =================================== */
+const worldGroup = new THREE.Group();
+scene.add(worldGroup);
+
+function buildTerrain(){
+  const geo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, Q.terrainSeg, Q.terrainSeg);
+  geo.rotateX(-Math.PI / 2);
+  const pos = geo.attributes.position;
+  HMAX = -Infinity;
+  for (let i = 0; i < pos.count; i++){
+    const h = heightFn(pos.getX(i), pos.getZ(i));
+    pos.setY(i, h);
+    if (h > HMAX) HMAX = h;
+  }
+  geo.computeVertexNormals();
+  const mesh = new THREE.Mesh(geo, terrainMat);
+  mesh.receiveShadow = true;
+  mesh.castShadow = false;
+  worldGroup.add(mesh);
+}
+
+/* --------- grass: chunked InstancedMesh grid for per-chunk frustum culling --------- */
+function buildGrass(){
+  /* hand-built 5-vertex / 3-triangle blade: cheap but tapers nicely */
+  const blade = new THREE.BufferGeometry();
+  blade.setAttribute('position', new THREE.Float32BufferAttribute([
+    -0.07, 0.00, 0.00,    0.07, 0.00, 0.00,
+    -0.05, 0.55, 0.02,    0.05, 0.55, 0.02,
+     0.00, 1.05, 0.06], 3));
+  blade.setIndex([0, 1, 2,  2, 1, 3,  2, 3, 4]);
+  const nrm = []; for (let i = 0; i < 5; i++) nrm.push(0, 0, 1);
+  blade.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+
+  const perChunk = Math.floor(Q.grass / (GRASS_CHUNKS * GRASS_CHUNKS));
+  const chunkSize = (GRASS_EXTENT * 2) / GRASS_CHUNKS;
+  const dummy = new THREE.Object3D();
+  const col = new THREE.Color();
+
+  for (let cx = 0; cx < GRASS_CHUNKS; cx++)
+  for (let cz = 0; cz < GRASS_CHUNKS; cz++){
+    const ox = -GRASS_EXTENT + cx * chunkSize;
+    const oz = -GRASS_EXTENT + cz * chunkSize;
+    const imesh = new THREE.InstancedMesh(blade, grassMat, perChunk);
+    let n = 0, attempts = 0;
+    const maxAttempts = perChunk * 2.5;
+    while (n < perChunk && attempts++ < maxAttempts){
+      const x = ox + rng() * chunkSize;
+      const z = oz + rng() * chunkSize;
+      const d = Math.hypot(x, z);
+      /* [P2] radial density falloff: full inside R140, fading out by R250 */
+      if (rng() > smoothstepJS(GRASS_FADE_R, GRASS_FULL_R, d)) continue;
+      const h = heightFn(x, z);
+      if (h < WATER_LEVEL || slopeFn(x, z) > 0.55) continue;   // no grass on cliffs/lowland
+      dummy.position.set(x, h, z);
+      dummy.rotation.set((rng() - 0.5) * 0.2, rng() * Math.PI * 2, (rng() - 0.5) * 0.2);
+      const s = 0.7 + rng() * 1.0;   // a touch taller/lusher
+      dummy.scale.set(s, s, s);
+      dummy.updateMatrix();
+      imesh.setMatrixAt(n, dummy.matrix);
+      col.setHSL(0.27 + (rng() - 0.5) * 0.08, 0.62, 0.32 + rng() * 0.12);  // hue variation
+      imesh.setColorAt(n, col);
+      n++;
+    }
+    imesh.count = n;
+    imesh.computeBoundingSphere();         // [P2] tight bounds -> chunk frustum culling
+    imesh.castShadow = false;              // 200k blade shadows would tank FPS
+    imesh.receiveShadow = true;
+    worldGroup.add(imesh);
+  }
+}
+
+/* ---------------- Poisson-disk scatter (Bridson) for tree positions ---------------- */
+function poissonDisk(radius, extent){
+  const cell = radius / Math.SQRT2;
+  const gw = Math.ceil((extent * 2) / cell);
+  const grid = new Array(gw * gw).fill(-1);
+  const pts = [], active = [];
+  const idx = (x, z) => {
+    const gx = Math.floor((x + extent) / cell), gz = Math.floor((z + extent) / cell);
+    return (gx < 0 || gz < 0 || gx >= gw || gz >= gw) ? -1 : gz * gw + gx;
+  };
+  const ok = (x, z) => {
+    if (Math.abs(x) > extent || Math.abs(z) > extent) return false;
+    const gx = Math.floor((x + extent) / cell), gz = Math.floor((z + extent) / cell);
+    for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++){
+      const nx = gx + dx, nz = gz + dz;
+      if (nx < 0 || nz < 0 || nx >= gw || nz >= gw) continue;
+      const pi = grid[nz * gw + nx];
+      if (pi >= 0){
+        const p = pts[pi];
+        if ((p[0]-x)*(p[0]-x) + (p[1]-z)*(p[1]-z) < radius * radius) return false;
+      }
+    }
+    return true;
+  };
+  const add = (x, z) => { pts.push([x, z]); grid[idx(x, z)] = pts.length - 1;
+                          active.push(pts.length - 1); };
+  add((rng() - 0.5) * extent, (rng() - 0.5) * extent);
+  while (active.length){
+    const ai = Math.floor(rng() * active.length);
+    const p = pts[active[ai]];
+    let placed = false;
+    for (let k = 0; k < 18; k++){
+      const ang = rng() * Math.PI * 2;
+      const r = radius * (1 + rng());
+      const x = p[0] + Math.cos(ang) * r, z = p[1] + Math.sin(ang) * r;
+      if (ok(x, z)){ add(x, z); placed = true; break; }
+    }
+    if (!placed) active.splice(ai, 1);
+  }
+  return pts;
+}
+
+function buildTrees(){
+  /* shared helper: gently bend a trunk-like geometry along Y with simplex noise */
+  const bendTrunk = (geo, height) => {
+    const p = geo.attributes.position;
+    for (let i = 0; i < p.count; i++){
+      const y = p.getY(i), f = y / height;
+      p.setX(i, p.getX(i) + simplex.noise2D(0.5, y * 0.35) * 0.35 * f);
+      p.setZ(i, p.getZ(i) + simplex.noise2D(9.1, y * 0.35) * 0.25 * f);
+    }
+    geo.computeVertexNormals();
+    return geo;
+  };
+
+  /* ------- PINE: tall trunk + 6 ragged, drooping foliage tiers (leaf cutout) ------- */
+  const pineTrunkGeo = bendTrunk(
+    new THREE.CylinderGeometry(0.10, 0.46, 9.5, 7, 6).translate(0, 4.75, 0), 9.5);
+  const tiers = [];
+  for (let t = 0; t < 6; t++){
+    const f = t / 5;                                    // 0 = bottom tier .. 1 = top
+    const r = lerpN(2.7, 0.7, f);                       // skirts narrow toward the top
+    const h = lerpN(2.2, 1.3, f);
+    const y = lerpN(2.6, 8.9, f);
+    const cone = new THREE.ConeGeometry(r, h, 9, 2, true);   // open cone = branch skirt
+    const p = cone.attributes.position;
+    for (let i = 0; i < p.count; i++){                  // ragged + drooping edges
+      const x = p.getX(i), yy = p.getY(i), z = p.getZ(i);
+      const d = simplex.noise3D(x * 1.4 + t * 9.0, yy * 1.4, z * 1.4) * 0.22 * r;
+      p.setXYZ(i, x + x * d * 0.4, yy - Math.abs(d) * 0.6, z + z * d * 0.4);
+    }
+    const uv = cone.attributes.uv;                      // tile the leaf clusters around
+    for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * 5.0, uv.getY(i) * 2.0);
+    cone.translate(0, y, 0);
+    cone.computeVertexNormals();
+    tiers.push(cone);
+  }
+  const pineFoliageGeo = mergeGeometries(tiers);
+
+  /* ------ BROADLEAF: bent trunk + 3 branches + a shell of leaf-cluster cards ------- */
+  const parts = [ bendTrunk(
+    new THREE.CylinderGeometry(0.14, 0.44, 4.8, 7, 5).translate(0, 2.4, 0), 4.8) ];
+  for (let b = 0; b < 3; b++){                          // three visible main branches
+    const br = new THREE.CylinderGeometry(0.05, 0.13, 2.6, 5, 1).translate(0, 1.3, 0);
+    br.rotateZ(0.7 + (b % 2) * 0.4);
+    br.rotateY(b * 2.1);
+    br.translate(0, 3.3 + b * 0.5, 0);
+    parts.push(br);
+  }
+  const broadTrunkGeo = mergeGeometries(parts);
+
+  const cards = [];
+  const cardRng = mulberry32(31337);                    // fixed: same crown every seed
+  for (let c = 0; c < 18; c++){                         // leaf-cluster billboard shell
+    const card = new THREE.PlaneGeometry(2.6, 2.0);
+    const th = cardRng() * Math.PI * 2;
+    const ph = Math.acos(2 * cardRng() - 1);
+    const shell = 0.45 + cardRng() * 0.55;              // some cards sit deep inside
+    const cx = Math.sin(ph) * Math.cos(th) * 2.5 * shell;
+    const cy = 5.7 + Math.cos(ph) * 1.9 * shell;
+    const cz = Math.sin(ph) * Math.sin(th) * 2.5 * shell;
+    card.rotateX(cardRng() * Math.PI);
+    card.rotateY(cardRng() * Math.PI * 2);
+    card.translate(cx, cy, cz);
+    cards.push(card);
+  }
+  const broadLeafGeo = mergeGeometries(cards);
+
+  /* ------------- scatter: Poisson positions filtered by height + slope ------------- */
+  const cand = poissonDisk(13, TREE_EXTENT)
+    .filter(([x, z]) => { const h = heightFn(x, z);
+      return h > 3 && h < 40 && slopeFn(x, z) < 0.5; });
+  for (let i = cand.length - 1; i > 0; i--){            // unbiased subset
+    const j = Math.floor(rng() * (i + 1)); [cand[i], cand[j]] = [cand[j], cand[i]];
+  }
+  const count = Math.min(Q.trees, cand.length);
+  const nPine = Math.floor(count * 0.55);               // mixed forest, pine-heavy
+
+  const pineTrunks  = new THREE.InstancedMesh(pineTrunkGeo,  trunkMat,   nPine);
+  const pineFol     = new THREE.InstancedMesh(pineFoliageGeo, foliageMat, nPine);
+  const broadTrunks = new THREE.InstancedMesh(broadTrunkGeo, trunkMat,   count - nPine);
+  const broadLeaves = new THREE.InstancedMesh(broadLeafGeo,  foliageMat, count - nPine);
+
+  const dummy = new THREE.Object3D(), col = new THREE.Color();
+  let ip = 0, ib = 0;
+  for (let i = 0; i < count; i++){
+    const [x, z] = cand[i];
+    const pine = i < nPine;
+    dummy.position.set(x, heightFn(x, z) - 0.3, z);     // sink 0.3m: no floating roots
+    dummy.rotation.set((rng() - 0.5) * 0.10, rng() * Math.PI * 2, (rng() - 0.5) * 0.10);
+    const s = pine ? 0.8 + rng() * 0.9 : 0.7 + rng() * 0.7;
+    dummy.scale.set(s, s * (0.9 + rng() * 0.25), s);    // slight height variation
+    dummy.updateMatrix();
+    if (pine){
+      pineTrunks.setMatrixAt(ip, dummy.matrix);
+      pineFol.setMatrixAt(ip, dummy.matrix);
+      col.setHSL(0.30 + rng() * 0.10, 0.42, 0.26 + rng() * 0.10); // darker fir greens
+      pineFol.setColorAt(ip, col); ip++;
+    } else {
+      broadTrunks.setMatrixAt(ib, dummy.matrix);
+      broadLeaves.setMatrixAt(ib, dummy.matrix);
+      col.setHSL(0.22 + rng() * 0.12, 0.50, 0.34 + rng() * 0.14); // lighter broadleaf
+      broadLeaves.setColorAt(ib, col); ib++;
+    }
+  }
+  for (const m of [pineTrunks, pineFol, broadTrunks, broadLeaves]){
+    m.castShadow = m.receiveShadow = true;
+    m.computeBoundingSphere();
+    worldGroup.add(m);
+  }
+}
+
+/* small white wildflowers growing in patches (cross-quad cutout sprites) */
+function buildFlowers(){
+  const q1 = new THREE.PlaneGeometry(0.42, 0.42).translate(0, 0.21, 0);
+  const q2 = q1.clone().rotateY(Math.PI / 2);
+  const geo = mergeGeometries([q1, q2]);
+  const flowers = new THREE.InstancedMesh(geo, flowerMat, Q.flowers);
+  const dummy = new THREE.Object3D();
+  let n = 0, attempts = 0;
+  while (n < Q.flowers && attempts++ < Q.flowers * 30){
+    const x = (rng() * 2 - 1) * GRASS_EXTENT;
+    const z = (rng() * 2 - 1) * GRASS_EXTENT;
+    if (Math.hypot(x, z) > GRASS_FADE_R * 0.95) continue;
+    /* flowers grow in patches: gate placement on a low-frequency noise field */
+    if (simplex.noise2D(x * 0.025 + 40, z * 0.025 - 40) < 0.35) continue;
+    const h = heightFn(x, z);
+    if (h < WATER_LEVEL || slopeFn(x, z) > 0.4) continue;
+    dummy.position.set(x, h, z);
+    dummy.rotation.y = rng() * Math.PI;
+    const s = 0.6 + rng() * 0.8;
+    dummy.scale.set(s, s, s);
+    dummy.updateMatrix();
+    flowers.setMatrixAt(n, dummy.matrix);
+    n++;
+  }
+  flowers.count = n;
+  flowers.castShadow = false;
+  flowers.receiveShadow = true;
+  flowers.computeBoundingSphere();
+  worldGroup.add(flowers);
+}
+
+function buildRocks(){
+  const geo = new THREE.IcosahedronGeometry(1, 2);
+  const p = geo.attributes.position;
+  for (let i = 0; i < p.count; i++){
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+    const d = 1 + simplex.noise3D(x * 1.3, y * 1.3, z * 1.3) * 0.35;
+    p.setXYZ(i, x * d, y * d, z * d);
+  }
+  geo.computeVertexNormals();           // flat shading comes from the material flag
+
+  const rocks = new THREE.InstancedMesh(geo, rockMat, Q.rocks);
+  const dummy = new THREE.Object3D(), col = new THREE.Color();
+  let n = 0, attempts = 0;
+  while (n < Q.rocks && attempts++ < Q.rocks * 40){
+    const x = (rng() * 2 - 1) * TREE_EXTENT;
+    const z = (rng() * 2 - 1) * TREE_EXTENT;
+    const sl = slopeFn(x, z);
+    /* bias toward slopes and ridges: steeper -> more likely to host a rock */
+    if (rng() > Math.min(1, sl * 1.8 + 0.08)) continue;
+    const s = 0.5 + rng() * 1.9;
+    dummy.position.set(x, heightFn(x, z) - 0.4 * s, z);      // partially buried
+    dummy.rotation.set(rng() * Math.PI, rng() * Math.PI, rng() * Math.PI);
+    dummy.scale.set(s * (0.8 + rng() * 0.5), s, s * (0.8 + rng() * 0.5));
+    dummy.updateMatrix();
+    rocks.setMatrixAt(n, dummy.matrix);
+    const g = 0.45 + rng() * 0.25;
+    col.setRGB(g, g, g * (0.96 + rng() * 0.06));
+    rocks.setColorAt(n, col);
+    n++;
+  }
+  rocks.count = n;
+  rocks.castShadow = rocks.receiveShadow = true;
+  rocks.computeBoundingSphere();
+  worldGroup.add(rocks);
+}
+
+/* full rebuild on reseed: dispose all world geometry, keep shared materials */
+function rebuildWorld(seed){
+  for (const child of [...worldGroup.children]){
+    worldGroup.remove(child);
+    if (child.geometry) child.geometry.dispose();
+    if (child.dispose) child.dispose();              // InstancedMesh internal buffers
+  }
+  initNoise(seed);
+  buildTerrain();
+  buildGrass();
+  buildTrees();
+  buildRocks();
+  buildFlowers();
+}
+
+/* ==================================== clouds ======================================= */
+/* Runtime canvas-generated FBM noise texture + two big drifting plane layers.
+   Coverage/darkness are uniforms -> weather interpolates them smoothly. [P9][P11] */
+function makeCloudTexture(size){
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = size;
+  const ctx = cv.getContext('2d');
+  const img = ctx.createImageData(size, size);
+  const n = new SimplexNoise(mulberry32(424242));
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++){
+    let v = 0, a = 0.5, f = 3 / size, b = 0;
+    /* fbm + billow (1-|n|) mix -> puffier, more detailed cumulus shapes */
+    for (let o = 0; o < 7; o++){ const s2 = n.noise2D(x * f, y * f);
+      v += a * s2; b += a * (1 - Math.abs(s2)); a *= 0.5; f *= 2; }
+    const c = Math.floor(clamp01((v * 0.5 + 0.5) * 0.55 + (b - 0.50) * 0.70) * 255);
+    const i = (y * size + x) * 4;
+    img.data[i] = img.data[i+1] = img.data[i+2] = c;
+    img.data[i+3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.wrapS = tex.wrapT = THREE.MirroredRepeatWrapping;   // mirrored: hides the seam
+  return tex;
+}
+
+const cloudUniforms = {
+  uTime:    U.uTime,
+  uWindDir: U.uWindDir,
+  uCover:   { value: 0.22 },             // 0 none .. 1 overcast
+  uDark:    { value: 0.12 },             // 0 white .. 1 storm-black
+  uDrift:   { value: 6.0 },              // texture drift speed (m/s-ish)
+  uSunCol:  { value: new THREE.Color(1, 0.95, 0.85) },   // lit side
+  uShadeCol:{ value: new THREE.Color(0.55, 0.6, 0.7) },  // shaded side
+  uHorizonColor: U.uHorizonColor
+};
+
+function makeCloudLayer(tex, y, scaleMul, off){
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { ...cloudUniforms, uTex: { value: tex }, uOff: { value: off },
+                uScaleMul: { value: scaleMul } },
+    transparent: true, depthWrite: false, side: THREE.DoubleSide,
+    vertexShader: /* glsl */`
+      varying vec2 vUv; varying vec3 vWp;
+      void main(){
+        vUv = uv;
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWp = wp.xyz;
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }`,
+    fragmentShader: /* glsl */`
+      uniform sampler2D uTex;
+      uniform float uTime, uCover, uDark, uDrift, uScaleMul, uOff;
+      uniform vec2 uWindDir;
+      uniform vec3 uSunCol, uShadeCol, uHorizonColor;
+      varying vec2 vUv; varying vec3 vWp;
+      void main(){
+        vec2 drift = uWindDir * uTime * uDrift * 0.0004;
+        /* two texture scales blended -> richer shapes, less obvious tiling */
+        float n1 = texture2D(uTex, vUv * (2.0 * uScaleMul) + drift + uOff).r;
+        float n2 = texture2D(uTex, vUv * (5.3 * uScaleMul) - drift * 1.7 + uOff * 2.0).r;
+        float n3 = texture2D(uTex, vUv * (11.7 * uScaleMul) + drift * 2.6 + uOff * 3.0).r;
+        float n  = n1 * 0.55 + n2 * 0.30 + n3 * 0.15;
+        /* coverage threshold with a soft shoulder */
+        float a = smoothstep(1.0 - uCover, 1.0 - uCover + 0.32, n);
+        /* radial fade so the square plane edge is never visible */
+        float edge = smoothstep(0.5, 0.32, length(vUv - 0.5));
+        a *= edge * 0.9;
+        vec3 col = mix(uShadeCol, uSunCol, pow(n, 1.5));
+        col += uSunCol * smoothstep(0.62, 0.95, n) * 0.45 * (1.0 - uDark); // silver lining
+        col = mix(col, col * 0.35, uDark);                  // darken under storm
+        col = mix(uHorizonColor, col, edge);                // blend to haze at edges
+        gl_FragColor = vec4(col, a);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }`
+  });
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2600, 2600), mat);
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.position.y = y;
+  mesh.renderOrder = 5;
+  return mesh;
+}
+const cloudTex = makeCloudTexture(512);
+scene.add(makeCloudLayer(cloudTex, 165, 1.0, 0.0));
+scene.add(makeCloudLayer(cloudTex, 205, 1.6, 0.37));
+scene.add(makeCloudLayer(cloudTex, 248, 2.4, 0.71));   // high thin layer: extra depth
+
+/* ===================================== sky ========================================= */
+const skyUniforms = {
+  uSunPos:         { value: new THREE.Vector3(0, 1, 0) },
+  uRayleigh:       { value: 2.0 },
+  uTurbidity:      { value: 3.0 },
+  uMieCoefficient: { value: 0.0035 },
+  uMieG:           { value: 0.76 },
+  uStarVis:        { value: 0.0 },
+  uTime:           U.uTime
+};
+const skyMesh = new THREE.Mesh(
+  new THREE.SphereGeometry(1, 48, 24),
+  new THREE.ShaderMaterial({ uniforms: skyUniforms, vertexShader: SKY_VERT,
+                             fragmentShader: SKY_FRAG, side: THREE.BackSide,
+                             depthWrite: false }));
+skyMesh.scale.setScalar(2000);
+skyMesh.renderOrder = -10;
+scene.add(skyMesh);
+
+/* ==================================== birds ======================================== */
+/* 2-triangle flapping mesh, nose along +Z so lookAt() points it along its velocity. */
+function makeBirdGeometry(){
+  const g = new THREE.BufferGeometry();
+  /* nose, tail, left wingtip, right wingtip — two triangles sharing the body line */
+  const v = new Float32Array([
+     0.00, 0, 0.55,   -0.95, 0, -0.15,    0.00, 0, -0.45,   // left wing
+     0.00, 0, 0.55,    0.00, 0, -0.45,    0.95, 0, -0.15]); // right wing
+  g.setAttribute('position', new THREE.BufferAttribute(v, 3));
+  g.computeVertexNormals();
+  g.scale(1.6, 1.6, 1.6);
+  return g;
+}
+const birdMat = patchMaterial(
+  new THREE.MeshBasicMaterial({ color: 0x1c1f26, side: THREE.DoubleSide }),
+  { key: 'bird', birdFlap: true });
+
+const birds = new THREE.InstancedMesh(makeBirdGeometry(), birdMat, Q.birds);
+{ /* per-instance wing phase so the flock doesn't flap in unison */
+  const phases = new Float32Array(Q.birds);
+  for (let i = 0; i < Q.birds; i++) phases[i] = Math.random() * Math.PI * 2;
+  birds.geometry.setAttribute('aPhase',
+    new THREE.InstancedBufferAttribute(phases, 1));
+}
+birds.frustumCulled = false;            // flock roams; skip stale-bounds culling
+scene.add(birds);
+
+/* boids state */
+const boidP = [], boidV = [];
+for (let i = 0; i < Q.birds; i++){
+  boidP.push(new THREE.Vector3((Math.random()-0.5)*200, 110 + Math.random()*40,
+                               (Math.random()-0.5)*200));
+  boidV.push(new THREE.Vector3((Math.random()-0.5)*10, (Math.random()-0.5)*2,
+                               (Math.random()-0.5)*10));
+}
+const _bd = new THREE.Object3D();
+const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
+const _steer = new THREE.Vector3();
+
+function updateBoids(dt){
+  /* [P10] soft altitude band ABOVE max terrain so birds never tunnel hills */
+  const yMin = HMAX + 25, yMax = HMAX + 70;
+  for (let i = 0; i < Q.birds; i++){
+    const p = boidP[i], v = boidV[i];
+    _v1.set(0,0,0); _v2.set(0,0,0); _v3.set(0,0,0);
+    let nSep = 0, nNear = 0;
+    for (let j = 0; j < Q.birds; j++){
+      if (i === j) continue;
+      const d2 = p.distanceToSquared(boidP[j]);
+      if (d2 < 36){                                       // separation < 6m
+        _steer.subVectors(p, boidP[j]).multiplyScalar(1 / Math.max(d2, 1));
+        _v1.add(_steer); nSep++;
+      }
+      if (d2 < 900){                                      // align/cohere < 30m
+        _v2.add(boidV[j]); _v3.add(boidP[j]); nNear++;
+      }
+    }
+    if (nSep)  v.addScaledVector(_v1, 22 * dt);
+    if (nNear){
+      _v2.divideScalar(nNear).sub(v);        v.addScaledVector(_v2, 1.4 * dt);
+      _v3.divideScalar(nNear).sub(p);        v.addScaledVector(_v3, 0.8 * dt);
+    }
+    /* soft steer back toward the world centre beyond radius 160 (no hard walls) */
+    const r = Math.hypot(p.x, p.z);
+    if (r > 160){
+      _steer.set(-p.x, 0, -p.z).normalize();
+      v.addScaledVector(_steer, (r - 160) * 0.05 * dt * 60);
+    }
+    /* soft altitude band */
+    if (p.y < yMin) v.y += (yMin - p.y) * 0.8 * dt;
+    if (p.y > yMax) v.y -= (p.y - yMax) * 0.8 * dt;
+    /* tangential swirl -> lazy circling arcs */
+    _steer.set(-p.z, 0, p.x).normalize();
+    v.addScaledVector(_steer, 2.2 * dt);
+    /* clamp speed to a believable band */
+    const sp = v.length();
+    if (sp > 15) v.multiplyScalar(15 / sp);
+    if (sp < 7 && sp > 0.01) v.multiplyScalar(7 / sp);
+    p.addScaledVector(v, dt);
+
+    _bd.position.copy(p);
+    _v1.copy(p).add(v);
+    _bd.lookAt(_v1);                                     // +Z (nose) faces travel dir
+    _bd.updateMatrix();
+    birds.setMatrixAt(i, _bd.matrix);
+  }
+  birds.instanceMatrix.needsUpdate = true;
+}
+
+/* ===================================== rain ======================================== */
+/* [P15] pre-allocated instanced quads; only uniforms change with weather. */
+const rainUniforms = {
+  uTime: U.uTime, uWindDir: U.uWindDir, uWindStrength: U.uWindStrength,
+  uRain:  { value: 0 },                  // 0 none .. 1 downpour (alpha multiplier)
+  uFallH: { value: 140 },                // fall column height (m)
+  uBaseY: { value: -5 }                  // column base altitude
+};
+const rain = (() => {
+  const base = new THREE.PlaneGeometry(1, 1);
+  const geo = new THREE.InstancedBufferGeometry();
+  geo.index = base.index;
+  geo.attributes.position = base.attributes.position;
+  geo.attributes.uv = base.attributes.uv;
+  const offs = new Float32Array(Q.rain * 3);
+  const spd  = new Float32Array(Q.rain);
+  const len  = new Float32Array(Q.rain);
+  for (let i = 0; i < Q.rain; i++){
+    offs[i*3]   = (Math.random()*2-1) * 260;       // x spawn
+    offs[i*3+1] = Math.random() * 140;             // y phase within the column
+    offs[i*3+2] = (Math.random()*2-1) * 260;       // z spawn
+    spd[i] = 28 + Math.random() * 14;              // fall speed m/s
+    len[i] = 0.35 + Math.random() * 0.5;           // streak length
+  }
+  geo.setAttribute('aOffset', new THREE.InstancedBufferAttribute(offs, 3));
+  geo.setAttribute('aSpeed',  new THREE.InstancedBufferAttribute(spd, 1));
+  geo.setAttribute('aLen',    new THREE.InstancedBufferAttribute(len, 1));
+  const mat = new THREE.ShaderMaterial({
+    uniforms: rainUniforms, transparent: true, depthWrite: false,
+    vertexShader: /* glsl */`
+      attribute vec3 aOffset; attribute float aSpeed; attribute float aLen;
+      uniform float uTime, uFallH, uBaseY, uWindStrength;
+      uniform vec2 uWindDir;
+      varying vec2 vQ;
+      void main(){
+        vQ = uv;
+        float y = mod(aOffset.y - uTime * aSpeed, uFallH);   // wraps -> endless fall
+        vec3 wp = vec3(aOffset.x, uBaseY + y, aOffset.z);
+        /* wind shear: drops drift sideways more the higher they are */
+        wp.xz += uWindDir * uWindStrength * (uFallH - y) * 0.10;
+        vec4 mv = viewMatrix * vec4(wp, 1.0);
+        mv.x += position.x * 0.05;                            // billboard width
+        mv.y += position.y * aLen;                            // billboard streak length
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: /* glsl */`
+      uniform float uRain;
+      varying vec2 vQ;
+      void main(){
+        float a = (1.0 - abs(vQ.x - 0.5) * 2.0) * sin(vQ.y * 3.14159) * 0.22 * uRain;
+        gl_FragColor = vec4(vec3(0.62, 0.72, 0.85), a);
+      }`
+  });
+  const m = new THREE.Mesh(geo, mat);
+  m.frustumCulled = false;
+  m.visible = false;
+  scene.add(m);
+  return m;
+})();
+
+/* ================================ weather machine ================================== */
+/* Pure-float parameter sets interpolated with smoothstep over 20-40s. [P11] */
+const WEATHER = {
+  Clear:  { cover: 0.22, dark: 0.12, sunI: 1.00, turb: 3,  wind: 0.55, rain: 0.00, wet: 0.00, expo: 1.00, hemi: 1.00 },
+  Cloudy: { cover: 0.62, dark: 0.45, sunI: 0.55, turb: 8,  wind: 0.95, rain: 0.00, wet: 0.10, expo: 0.95, hemi: 0.80 },
+  Rain:   { cover: 0.85, dark: 0.62, sunI: 0.30, turb: 11, wind: 1.40, rain: 0.75, wet: 0.85, expo: 0.90, hemi: 0.60 },
+  Storm:  { cover: 1.00, dark: 0.88, sunI: 0.12, turb: 16, wind: 2.20, rain: 1.00, wet: 1.00, expo: 0.84, hemi: 0.45 }
+};
+const CYCLE = ['Clear', 'Cloudy', 'Rain', 'Storm', 'Cloudy', 'Clear'];
+const weather = {
+  cur:  { ...WEATHER.Clear },           // live interpolated values
+  from: { ...WEATHER.Clear },
+  to:   WEATHER.Clear,
+  t: 1, dur: 25,                        // transition progress / duration (s)
+  cycleIdx: 0, holdTimer: 18,           // auto-cycle state
+  set(name){
+    this.from = { ...this.cur };
+    this.to = WEATHER[name];
+    this.t = 0;
+    this.dur = 20 + Math.random() * 20;  // 20-40s smooth transition
+  },
+  update(dt, autoCycle){
+    if (this.t < 1){
+      this.t = Math.min(1, this.t + dt / this.dur);
+      const s = this.t * this.t * (3 - 2 * this.t);          // smoothstep
+      for (const k in this.cur) this.cur[k] = lerpN(this.from[k], this.to[k], s);
+    } else if (autoCycle){
+      this.holdTimer -= dt;
+      if (this.holdTimer <= 0){
+        this.cycleIdx = (this.cycleIdx + 1) % CYCLE.length;
+        this.set(CYCLE[this.cycleIdx]);
+        this.holdTimer = 15 + Math.random() * 10;
+      }
+    }
+  }
+};
+
+/* lightning: random short flashes while the sky is storm-dark */
+let flashPower = 0, flashTimer = 4;
+function updateLightning(dt){
+  if (weather.cur.dark > 0.8){
+    flashTimer -= dt;
+    if (flashTimer <= 0){
+      flashPower = 4 + Math.random() * 6;
+      flashTimer = 2 + Math.random() * 8;
+      lightningLight.position.set((Math.random()-0.5)*400, 300, (Math.random()-0.5)*400);
+    }
+  }
+  flashPower *= Math.exp(-dt * 9);                  // fast exponential decay
+  lightningLight.intensity = flashPower;
+}
+
+/* ================================= post-processing ================================= */
+/* [P14] all passes resized on window resize; MSAA target when WebGL2 is available */
+const renderTarget = new THREE.WebGLRenderTarget(
+  window.innerWidth, window.innerHeight,
+  { samples: HAS_WEBGL2 ? 4 : 0, type: THREE.HalfFloatType });
+const composer  = new EffectComposer(renderer, renderTarget);
+composer.addPass(new RenderPass(scene, camera));
+
+/* [P5] SAO tuned subtly: small radius, low intensity, blur on */
+const saoPass = new SAOPass(scene, camera);
+saoPass.params.saoIntensity   = 0.012;
+saoPass.params.saoScale       = 28;
+saoPass.params.saoKernelRadius = 22;
+saoPass.params.saoBlur        = true;
+saoPass.enabled = Q.sao;
+composer.addPass(saoPass);
+
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  0.25,   // strength: subtle sun glare / bright cloud rims
+  0.6,    // radius
+  0.92);  // threshold: only the brightest pixels bloom
+composer.addPass(bloomPass);
+composer.addPass(new OutputPass());     // applies tone mapping + sRGB conversion
+
+/* ===================================== GUI ========================================= */
+const params = {
+  timeOfDay: 16.3,        // 24h clock; 16.3 = beautiful late-afternoon default
+  weather: 'Clear',
+  autoCycle: true,
+  wind: 1.0,              // multiplier on the weather wind value
+  mist: 0.45,             // baseline forest mist added to the aerial fog
+  seed: 1337,
+  ssao: Q.sao,
+  bloom: 0.25,
+  regenerate(){ rebuildWorld(Math.floor(params.seed)); fitShadow(); }
+};
+const gui = new GUI({ title: 'World' });
+gui.add(params, 'timeOfDay', 0, 24, 0.05).name('Sun time');
+gui.add(params, 'weather', Object.keys(WEATHER)).name('Weather')
+   .onChange(v => { params.autoCycle = false; weather.set(v); gui.controllers
+     .find(c => c.property === 'autoCycle')?.updateDisplay(); });
+gui.add(params, 'autoCycle').name('Auto-cycle');
+gui.add(params, 'wind', 0, 3, 0.01).name('Wind');
+gui.add(params, 'mist', 0, 1, 0.01).name('Mist');
+gui.add(params, 'seed', 1, 999999, 1).name('Seed');
+gui.add(params, 'regenerate').name('Regenerate world');
+gui.add(params, 'ssao').name('SSAO').onChange(v => { saoPass.enabled = v && Q.sao !== false; });
+gui.add(params, 'bloom', 0, 1.5, 0.01).name('Bloom').onChange(v => { bloomPass.strength = v; });
+
+/* ================================ sun / sky update ================================= */
+const _sunDir = new THREE.Vector3();
+function fitShadow(){ sunLight.shadow.camera.updateProjectionMatrix(); }
+
+function updateSun(){
+  const t = params.timeOfDay;
+  const elev = Math.sin((t - 6) / 12 * Math.PI);            // -1 midnight .. 1 noon
+  const azim = (t / 24) * Math.PI * 2 - Math.PI / 2;
+  _sunDir.set(Math.cos(azim) * Math.sqrt(Math.max(0.001, 1 - elev*elev)),
+              elev,
+              Math.sin(azim) * Math.sqrt(Math.max(0.001, 1 - elev*elev))).normalize();
+  U.uSunDirW.value.copy(_sunDir);
+  U.uSunDirV.value.copy(_sunDir).transformDirection(camera.matrixWorldInverse);
+
+  /* directional light follows the sun; intensity fades through twilight */
+  sunLight.position.copy(_sunDir).multiplyScalar(320);
+  sunLight.target.position.set(0, 0, 0);
+  const day = smoothstepJS(-0.04, 0.12, elev);
+  sunLight.intensity = 3.4 * weather.cur.sunI * day;
+  /* warm orange at low sun, white at noon */
+  const warm = smoothstepJS(0.35, 0.02, elev);
+  sunLight.color.setRGB(1, lerpN(1, 0.55, warm), lerpN(1, 0.25, warm));
+  hemiLight.intensity = 0.5 * weather.cur.hemi * day + 0.02;
+  U.uSunI.value = weather.cur.sunI * day;
+
+  /* sky shader state */
+  skyUniforms.uSunPos.value.copy(_sunDir).multiplyScalar(450000);
+  skyUniforms.uTurbidity.value      = weather.cur.turb;
+  skyUniforms.uRayleigh.value       = clampN(2.6 - weather.cur.cover * 1.4, 0.5, 3);
+  skyUniforms.uMieCoefficient.value = 0.0035 + weather.cur.rain * 0.004;
+  skyUniforms.uStarVis.value =
+    smoothstepJS(0.05, -0.08, elev) * (1 - weather.cur.cover * 0.85);
+
+  /* ---- aerial-fog colours derived from the same sun/weather state ---- */
+  const cover = weather.cur.cover, rainAmt = weather.cur.rain;
+  const night = new THREE.Color(0.012, 0.02, 0.045);
+  const dayHaze = new THREE.Color(0.62, 0.71, 0.85);
+  const overcast = new THREE.Color(0.42, 0.45, 0.50);
+  const horizon = dayHaze.clone().lerp(overcast, cover).lerp(night, 1 - day);
+  U.uHorizonColor.value.copy(horizon);
+  const dusk = Math.exp(-Math.pow((elev - 0.03) / 0.12, 2));  // gaussian around sunset
+  U.uSunHazeColor.value.setRGB(1.0, lerpN(0.85, 0.45, dusk), lerpN(0.6, 0.22, dusk))
+    .multiplyScalar(day * (1 - cover * 0.6) + 0.05);
+  U.uFogDensity.value = 0.0008 + cover * 0.0010 + rainAmt * 0.0022
+                      + params.mist * 0.0016;                 // user mist slider
+
+  /* cloud + lighting colours */
+  cloudUniforms.uSunCol.value.copy(sunLight.color).multiplyScalar(0.55 + 0.45 * day);
+  cloudUniforms.uShadeCol.value.copy(horizon).multiplyScalar(0.8);
+  cloudUniforms.uCover.value = cover;
+  cloudUniforms.uDark.value  = weather.cur.dark;
+
+  renderer.toneMappingExposure = weather.cur.expo;            // exposure tied to weather
+}
+
+/* =============================== resize / context loss ============================= */
+window.addEventListener('resize', () => {                     // [P14]
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
+  bloomPass.setSize(window.innerWidth, window.innerHeight);
+});
+renderer.domElement.addEventListener('webglcontextlost', (e) => {  // [P13]
+  e.preventDefault();
+  document.getElementById('msg').style.display = 'flex';
+});
+
+/* ================================== main loop ====================================== */
+const fpsEl = document.getElementById('fps');
+let frames = 0, fpsClock = 0, prev = performance.now();
+
+function animate(now){
+  requestAnimationFrame(animate);
+  const dt = Math.min(0.05, (now - prev) / 1000);             // clamp dt: tab-switch safety
+  prev = now;
+
+  U.uTime.value += dt;
+  weather.update(dt, params.autoCycle);
+  U.uWetness.value      = weather.cur.wet;
+  U.uWindStrength.value = weather.cur.wind * params.wind;
+  rainUniforms.uRain.value = weather.cur.rain;
+  rain.visible = weather.cur.rain > 0.01;
+  updateLightning(dt);
+  updateSun();
+  updateBoids(dt);
+
+  /* idle auto-drift: gentle orbit after ~7s without input */
+  controls.autoRotate = (performance.now() - lastInteraction) > 7000;
+  controls.autoRotateSpeed = -0.18;
+  controls.update();
+
+  /* keep the camera above the terrain surface (works with damping) */
+  const minY = heightFn(camera.position.x, camera.position.z) + 2.2;
+  if (camera.position.y < minY) camera.position.y = minY;
+
+  /* FPS counter, refreshed twice a second */
+  frames++; fpsClock += dt;
+  if (fpsClock >= 0.5){
+    fpsEl.textContent = Math.round(frames / fpsClock) + ' FPS';
+    frames = 0; fpsClock = 0;
+  }
+
+  composer.render();
+}
+
+/* ==================================== kick off ===================================== */
+rebuildWorld(params.seed);
+fitShadow();
+weather.set('Clear');
+requestAnimationFrame((t) => { prev = t; animate(t); });
+</script>
+</body>
+</html>
