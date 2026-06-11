@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Gautham Vijayaraj — AI Engineer</title>
+<meta name="description" content="Gautham Vijayaraj — Agentic AI Engineer. RAG, MCP, A2A workflows, ServiceNow development, data products, full-stack delivery." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='2' y='2' width='12' height='12' fill='none' stroke='%2300f3ff' stroke-width='1.5'/%3E%3Cline x1='2' y1='8' x2='14' y2='8' stroke='%230044ff'/%3E%3C/svg%3E" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Michroma&family=IBM+Plex+Mono:wght@300;400;500;600&display=swap" rel="stylesheet" />
+<style>
+/* ============================================================
+   TOKENS — AutoCAD / wireframe blueprint system
+   ============================================================ */
+:root{
+  --ink:        #05050a;   /* void background            */
+  --cyan:       #00f3ff;   /* primary structural neon    */
+  --blue:       #0044ff;   /* blueprint secondary        */
+  --blue-dim:   #14305c;   /* recessed grid blue         */
+  --orange:     #ff6a00;   /* safety / annotation accent */
+  --lime:       #d8ff63;   /* data / measurement accent  */
+  --paper:      #c9d6e2;   /* body text on void          */
+  --hairline:   rgba(0,243,255,.28);
+  --panel-bg:   rgba(6,9,18,.82);
+  --font-disp:  'Michroma', sans-serif;
+  --font-mono:  'IBM Plex Mono', monospace;
+}
+*{ margin:0; padding:0; box-sizing:border-box; }
+html{ scroll-behavior:auto; }
+body{
+  background:var(--ink);
+  color:var(--paper);
+  font-family:var(--font-mono);
+  overflow-x:hidden;
+}
+::selection{ background:var(--cyan); color:var(--ink); }
+
+/* Scroll runway — invisible, just provides scroll length */
+#scroll-space{ height:1300vh; position:relative; z-index:0; }
+
+/* WebGL canvas */
+#scene{
+  position:fixed; inset:0; width:100%; height:100%;
+  display:block; z-index:1;
+}
+
+/* ============================================================
+   HUD CHROME — fixed engineering interface
+   ============================================================ */
+.hud{ position:fixed; z-index:10; pointer-events:none; }
+
+/* corner crosshair brackets */
+.corner{ width:26px; height:26px; opacity:.7; }
+.corner::before, .corner::after{ content:""; position:absolute; background:var(--cyan); }
+.corner::before{ width:100%; height:1px; }
+.corner::after{ width:1px; height:100%; }
+.c-tl{ top:14px; left:14px; }   .c-tl::before{ top:0; left:0; }   .c-tl::after{ top:0; left:0; }
+.c-tr{ top:14px; right:14px; }  .c-tr::before{ top:0; right:0; }  .c-tr::after{ top:0; right:0; }
+.c-bl{ bottom:14px; left:14px; } .c-bl::before{ bottom:0; left:0; } .c-bl::after{ bottom:0; left:0; }
+.c-br{ bottom:14px; right:14px; }.c-br::before{ bottom:0; right:0; }.c-br::after{ bottom:0; right:0; }
+
+/* top navigation bar */
+header{
+  position:fixed; top:0; left:0; right:0; z-index:20;
+  display:flex; align-items:center; justify-content:space-between;
+  padding:18px 56px; pointer-events:none;
+  background:linear-gradient(to bottom, rgba(5,5,10,.85), transparent);
+}
+.brand{
+  font-family:var(--font-disp); font-size:13px; letter-spacing:.22em;
+  color:var(--cyan); pointer-events:auto; text-decoration:none; white-space:nowrap;
+}
+.brand small{ font-family:var(--font-mono); color:var(--blue); font-size:10px; letter-spacing:.18em; display:block; margin-top:3px; }
+nav{ display:flex; gap:8px; pointer-events:auto; }
+nav button{
+  background:transparent; border:1px solid transparent; cursor:pointer;
+  color:var(--paper); font-family:var(--font-mono); font-size:11px;
+  letter-spacing:.22em; padding:8px 14px; transition:color .25s, border-color .25s;
+}
+nav button:hover, nav button:focus-visible{ color:var(--cyan); border-color:var(--hairline); outline:none; }
+nav button .idx{ color:var(--orange); margin-right:6px; }
+
+/* bottom-left coordinate readout */
+#coords{
+  bottom:30px; left:56px; font-size:11px; letter-spacing:.14em;
+  line-height:1.9; color:var(--cyan);
+}
+#coords .dim{ color:var(--blue); }
+#coords .val{ color:var(--lime); }
+#coords .sector{ color:var(--orange); }
+
+/* bottom-right viewport status */
+#status{
+  bottom:30px; right:56px; font-size:10px; letter-spacing:.18em;
+  text-align:right; line-height:1.9; color:var(--blue);
+}
+#status b{ color:var(--cyan); font-weight:500; }
+
+/* scroll progress bar — bottom hairline */
+#progress-track{
+  position:fixed; left:0; right:0; bottom:0; height:3px; z-index:20;
+  background:rgba(0,68,255,.18);
+}
+#progress-bar{
+  height:100%; width:0%; background:var(--cyan);
+  box-shadow:0 0 10px var(--cyan);
+}
+
+/* ============================================================
+   CONTENT PANELS — blueprint annotation cards
+   ============================================================ */
+.panel{
+  position:fixed; z-index:15; max-width:430px; padding:30px 32px;
+  background:var(--panel-bg); border:1px solid var(--hairline);
+  backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+  opacity:0; transform:translateY(26px); pointer-events:none;
+  transition:opacity .55s ease, transform .55s ease;
+  top:50%; margin-top:-160px;
+}
+.panel.visible{ opacity:1; transform:translateY(0); pointer-events:auto; }
+.panel.left{ left:6vw; }
+.panel.right{ right:6vw; }
+/* corner tick marks on panels */
+.panel::before, .panel::after{
+  content:""; position:absolute; width:10px; height:10px;
+  border-color:var(--cyan); border-style:solid;
+}
+.panel::before{ top:-1px; left:-1px; border-width:1px 0 0 1px; }
+.panel::after{ bottom:-1px; right:-1px; border-width:0 1px 1px 0; }
+
+.ref{
+  font-size:10px; letter-spacing:.28em; color:var(--orange);
+  margin-bottom:14px; display:flex; justify-content:space-between; gap:12px;
+}
+.ref .file{ color:var(--blue); letter-spacing:.12em; }
+.panel h2{
+  font-family:var(--font-disp); font-size:19px; line-height:1.45;
+  color:#fff; letter-spacing:.06em; margin-bottom:14px; font-weight:400;
+}
+.panel p{ font-size:12.5px; line-height:1.85; color:var(--paper); font-weight:300; }
+.panel .dimline{
+  margin-top:20px; padding-top:12px; border-top:1px dashed rgba(0,68,255,.5);
+  font-size:10px; letter-spacing:.2em; color:var(--blue);
+  display:flex; justify-content:space-between;
+}
+
+/* chips — specialties */
+.chips{ display:flex; flex-wrap:wrap; gap:7px; margin-top:16px; }
+.chips span{
+  font-size:10px; letter-spacing:.14em; padding:5px 10px;
+  border:1px solid rgba(0,243,255,.35); color:var(--cyan);
+}
+
+/* stats grid */
+.stats{ display:grid; grid-template-columns:1fr 1fr; gap:1px; background:rgba(0,68,255,.4); margin-top:18px; border:1px solid rgba(0,68,255,.4); }
+.stats div{ background:var(--panel-bg); padding:12px 14px; }
+.stats b{ display:block; font-size:21px; color:var(--lime); font-weight:500; letter-spacing:.04em; }
+.stats i{ font-style:normal; font-size:9.5px; letter-spacing:.16em; color:var(--blue); text-transform:uppercase; }
+
+/* ============================================================
+   HERO — center stage
+   ============================================================ */
+#hero{
+  position:fixed; inset:0; z-index:14; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; text-align:center;
+  pointer-events:none; transition:opacity .6s ease; padding:0 20px;
+}
+#hero.hidden{ opacity:0; }
+#hero .eyebrow{
+  font-size:11px; letter-spacing:.5em; color:var(--orange); margin-bottom:22px;
+}
+#hero h1{
+  font-family:var(--font-disp); font-weight:400; color:#fff;
+  font-size:clamp(26px, 5vw, 58px); letter-spacing:.1em; line-height:1.25;
+  text-shadow:0 0 24px rgba(0,243,255,.35);
+}
+#hero .tagline{
+  max-width:620px; margin-top:24px; font-size:13px; line-height:1.9;
+  color:var(--paper); font-weight:300;
+}
+#hero .terminal{
+  margin-top:26px; font-size:12px; letter-spacing:.12em; color:var(--lime);
+  border:1px solid rgba(216,255,99,.35); padding:9px 18px;
+}
+#hero .terminal::after{ content:"▌"; animation:blink 1.1s steps(1) infinite; margin-left:4px; }
+@keyframes blink{ 50%{ opacity:0; } }
+#hero .scroll-cue{
+  position:absolute; bottom:64px; font-size:10px; letter-spacing:.4em; color:var(--cyan);
+  animation:cue 2.4s ease-in-out infinite;
+}
+@keyframes cue{ 0%,100%{ transform:translateY(0); opacity:.9 } 50%{ transform:translateY(8px); opacity:.4 } }
+
+/* ============================================================
+   CONTACT — final transmission
+   ============================================================ */
+#p-contact{ left:50%; right:auto; transform:translate(-50%, 26px); max-width:520px; }
+#p-contact.visible{ transform:translate(-50%, 0); }
+.contact-links{ margin-top:18px; display:flex; flex-direction:column; }
+.contact-links a{
+  display:flex; justify-content:space-between; align-items:baseline; gap:18px;
+  padding:13px 4px; text-decoration:none; color:var(--paper);
+  border-bottom:1px solid rgba(0,68,255,.35); font-size:12.5px; letter-spacing:.06em;
+  transition:color .25s, padding-left .25s;
+}
+.contact-links a:last-child{ border-bottom:none; }
+.contact-links a .k{ color:var(--blue); font-size:10px; letter-spacing:.22em; }
+.contact-links a:hover, .contact-links a:focus-visible{ color:var(--orange); padding-left:10px; outline:none; }
+
+/* ============================================================
+   FALLBACKS & RESPONSIVE
+   ============================================================ */
+#nojs-note{
+  position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+  z-index:5; font-size:12px; color:var(--blue); letter-spacing:.2em; display:none;
+}
+@media (max-width:880px){
+  header{ padding:14px 18px; }
+  nav button{ padding:7px 8px; font-size:10px; letter-spacing:.12em; }
+  #coords{ left:18px; bottom:24px; font-size:9.5px; }
+  #status{ display:none; }
+  .panel, .panel.left, .panel.right{
+    left:50%; right:auto; transform:translate(-50%, 26px);
+    top:auto; bottom:54px; margin-top:0; width:min(440px, 92vw); max-width:92vw;
+    padding:22px 20px;
+  }
+  .panel.visible{ transform:translate(-50%, 0); }
+  #p-contact{ bottom:54px; }
+}
+@media (prefers-reduced-motion: reduce){
+  .panel, #hero, .contact-links a, nav button{ transition:none !important; }
+  #hero .scroll-cue, #hero .terminal::after{ animation:none !important; }
+}
+</style>
+</head>
+<body>
+
+<canvas id="scene" aria-hidden="true"></canvas>
+<div id="scroll-space"></div>
+
+<!-- ====== HUD chrome ====== -->
+<div class="hud corner c-tl"></div>
+<div class="hud corner c-tr"></div>
+<div class="hud corner c-bl"></div>
+<div class="hud corner c-br"></div>
+
+<header>
+  <a class="brand" href="#" id="brand-home">GAUTHAM&nbsp;VIJAYARAJ
+    <small>AI ENGINEER · PORTFOLIO REV 2026</small>
+  </a>
+  <nav aria-label="Site sections">
+    <button data-target="0.195"><span class="idx">01</span>ABOUT</button>
+    <button data-target="0.335"><span class="idx">02</span>PROJECTS</button>
+    <button data-target="0.965"><span class="idx">03</span>CONTACT</button>
+  </nav>
+</header>
+
+<div class="hud" id="coords" aria-hidden="true">
+  <span class="dim">X</span> <span id="cx" class="val">+000.00</span>&nbsp;&nbsp;
+  <span class="dim">Y</span> <span id="cy" class="val">+000.45</span>&nbsp;&nbsp;
+  <span class="dim">Z</span> <span id="cz" class="val">+0000.0</span><br/>
+  <span class="dim">VEL</span> <span id="cv" class="val">000.0</span> u/s&nbsp;&nbsp;
+  <span class="sector" id="csector">SECTOR: APPROACH</span>
+</div>
+
+<div class="hud" id="status" aria-hidden="true">
+  VIEW <b>PERSP — CHASE CAM</b><br/>
+  GRID <b>ON</b> · SNAP <b>5.0</b> · UNITS <b>VECTOR</b><br/>
+  RENDER <b>WIREFRAME / EDGES</b>
+</div>
+
+<div id="progress-track"><div id="progress-bar"></div></div>
+<div id="nojs-note">WEBGL UNAVAILABLE — STATIC BLUEPRINT MODE</div>
+
+<!-- ====== HERO ====== -->
+<div id="hero">
+  <div class="eyebrow">DWG № GV-2026 · AGENTIC AI ENGINEER</div>
+  <h1>GAUTHAM<br/>VIJAYARAJ</h1>
+  <p class="tagline">I build intelligent software where retrieval, orchestration, automation,
+  and product interfaces come together as reliable systems.</p>
+  <div class="terminal">$ build reliable_ai_products</div>
+  <div class="scroll-cue">SCROLL TO DRIVE ▼</div>
+</div>
+
+<!-- ====== STOP 1 · BLUEPRINT GARAGE ====== -->
+<section class="panel left" id="p-about" data-start="0.125" data-end="0.285">
+  <div class="ref"><span>REF A-01 · BLUEPRINT GARAGE</span><span class="file">about.json</span></div>
+  <h2>Current focus — Agentic AI Engineer</h2>
+  <p>Based in Arizona. I design and ship AI systems that hold up in production:
+  retrieval pipelines, agent orchestration, enterprise automation, and the
+  product surfaces that make them usable.</p>
+  <div class="chips">
+    <span>RAG</span><span>MCP</span><span>A2A WORKFLOWS</span>
+    <span>SERVICENOW</span><span>DATA PRODUCTS</span><span>FULL-STACK</span>
+  </div>
+  <div class="stats">
+    <div><b>15</b><i>AI &amp; data projects</i></div>
+    <div><b>40%</b><i>Manual effort reduced</i></div>
+    <div><b>500k+</b><i>Records modeled</i></div>
+    <div><b>4</b><i>Experience arcs</i></div>
+  </div>
+  <div class="dimline"><span>↔ STATION 0180.0</span><span>SCALE 1:1</span></div>
+</section>
+
+<!-- ====== STOP 2 · PROJECT / SYSTEM SHOWCASES ====== -->
+<section class="panel right" id="p-b1" data-start="0.30" data-end="0.415">
+  <div class="ref"><span>REF B-01 · SYSTEM TOWER</span><span class="file">01_interface.tsx</span></div>
+  <h2>Interface — clear product surfaces for complex systems.</h2>
+  <p>Interfaces should make AI workflows legible: what was retrieved, what was
+  automated, and what the user can trust next.</p>
+  <div class="dimline"><span>↔ STATION 0330.0</span><span>PHASE 01/03</span></div>
+</section>
+
+<section class="panel left" id="p-b2" data-start="0.42" data-end="0.535">
+  <div class="ref"><span>REF B-02 · SYSTEM TOWER</span><span class="file">02_orchestration.ts</span></div>
+  <h2>Orchestration — agents that coordinate tools and context.</h2>
+  <p>MCP servers, A2A handoffs, LangChain pipelines, and LLM reasoning become
+  repeatable workflows instead of one-off demos.</p>
+  <div class="dimline"><span>↔ STATION 0450.0</span><span>PHASE 02/03</span></div>
+</section>
+
+<section class="panel right" id="p-b3" data-start="0.545" data-end="0.655">
+  <div class="ref"><span>REF B-03 · SYSTEM TOWER</span><span class="file">03_delivery.yml</span></div>
+  <h2>Delivery — data products that can be shipped and used.</h2>
+  <p>Document intelligence, dashboards, prediction, and automation move through a
+  practical loop: ingest, retrieve, reason, validate, ship.</p>
+  <div class="dimline"><span>↔ STATION 0570.0</span><span>PHASE 03/03</span></div>
+</section>
+
+<section class="panel left" id="p-b4" data-start="0.665" data-end="0.77">
+  <div class="ref"><span>REF C-01 · SYSTEMS LOG</span><span class="file">experience.log</span></div>
+  <h2>Experience &amp; stack</h2>
+  <p>Roles spanning AI engineering, software development, research support, and
+  enterprise technology delivery.</p>
+  <p style="margin-top:12px">A practical stack for building AI products: data
+  foundations, model workflows, backend services, interfaces, and delivery.</p>
+  <div class="dimline"><span>↔ STATION 0650.0</span><span>4 ARCS LOGGED</span></div>
+</section>
+
+<!-- ====== STOP 3 · CITY EXIT / CONTACT ====== -->
+<section class="panel" id="p-contact" data-start="0.875" data-end="1.01">
+  <div class="ref"><span>REF Z-99 · CITY EXIT</span><span class="file">contact.cfg</span></div>
+  <h2>Open channels</h2>
+  <p>The car drives on — the conversation doesn't have to. Reach out for agentic AI,
+  enterprise automation, or full-stack delivery work.</p>
+  <div class="contact-links">
+    <a href="mailto:gvofficial99@gmail.com"><span class="k">EMAIL</span><span>gvofficial99@gmail.com</span></a>
+    <a href="tel:+16022470511"><span class="k">PHONE</span><span>+1 (602) 247-0511</span></a>
+    <a href="https://github.com/gauthiii" target="_blank" rel="noopener"><span class="k">GITHUB</span><span>github.com/gauthiii</span></a>
+    <a href="https://www.linkedin.com/in/gautham-vijayaraj/" target="_blank" rel="noopener"><span class="k">LINKEDIN</span><span>linkedin.com/in/gautham-vijayaraj</span></a>
+    <a href="./Resumes/Gautham_Vijayaraj_CV.pdf" target="_blank" rel="noopener"><span class="k">RESUME</span><span>Gautham_Vijayaraj_CV.pdf ↗</span></a>
+  </div>
+  <div class="dimline"><span>↔ STATION 0980.0</span><span>END OF DRAWING</span></div>
+</section>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/ScrollTrigger.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/ScrollToPlugin.min.js"></script>
+<script>
+(function(){
+"use strict";
+
+/* ================================================================
+   0. SETUP & ENVIRONMENT FLAGS
+   ================================================================ */
+var REDUCED = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var COL = { ink:0x05050a, cyan:0x00f3ff, blue:0x0044ff, blueDim:0x14305c,
+            orange:0xff6a00, lime:0xd8ff63 };
+
+var canvas = document.getElementById('scene');
+var renderer, scene, camera;
+try{
+  renderer = new THREE.WebGLRenderer({ canvas:canvas, antialias:true, alpha:false, powerPreference:'high-performance' });
+}catch(e){
+  // WebGL unavailable → static blueprint mode: show all panels in flow
+  document.getElementById('nojs-note').style.display = 'block';
+  document.querySelectorAll('.panel').forEach(function(p){ p.classList.add('visible'); p.style.position='relative'; p.style.margin='40px auto'; p.style.left='auto'; p.style.right='auto'; p.style.transform='none'; });
+  document.getElementById('scroll-space').style.height = 'auto';
+  return;
+}
+renderer.setClearColor(COL.ink, 1);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+
+scene = new THREE.Scene();
+scene.fog = new THREE.Fog(COL.ink, 42, 190);
+
+camera = new THREE.PerspectiveCamera(58, 1, 0.1, 420);
+camera.position.set(0, 5.2, 12.5);
+
+function resize(){
+  var w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+resize();
+
+/* ================================================================
+   1. GEOMETRY HELPERS — everything is glowing vector lines
+   ================================================================ */
+// Build a LineSegments object from a flat array of point pairs.
+function lines(segs, color, opacity){
+  var g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(segs, 3));
+  var m = new THREE.LineBasicMaterial({
+    color:color, transparent:true, opacity:(opacity===undefined?1:opacity)
+  });
+  return new THREE.LineSegments(g, m);
+}
+// push segment p1→p2 into array
+function seg(arr, x1,y1,z1, x2,y2,z2){ arr.push(x1,y1,z1, x2,y2,z2); }
+// push the 12 edges of a box centered at (cx,cy,cz)
+function boxEdges(arr, cx,cy,cz, w,h,d){
+  var x=w/2, y=h/2, z=d/2;
+  var c=[[-x,-y,-z],[x,-y,-z],[x,-y,z],[-x,-y,z],[-x,y,-z],[x,y,-z],[x,y,z],[-x,y,z]];
+  var e=[[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
+  for(var i=0;i<e.length;i++){
+    var a=c[e[i][0]], b=c[e[i][1]];
+    seg(arr, cx+a[0],cy+a[1],cz+a[2], cx+b[0],cy+b[1],cz+b[2]);
+  }
+}
+
+/* ================================================================
+   2. GROUND GRID + COORDINATE AXES
+   ================================================================ */
+var grid = new THREE.GridHelper(640, 128, COL.blueDim, COL.blueDim);
+grid.material.transparent = true;
+grid.material.opacity = 0.5;
+scene.add(grid);
+
+// secondary fine grid, cyan-tinted, fainter — gives the CAD double-grid feel
+var grid2 = new THREE.GridHelper(640, 32, COL.blue, COL.blue);
+grid2.material.transparent = true;
+grid2.material.opacity = 0.14;
+grid2.position.y = 0.01;
+scene.add(grid2);
+
+// origin axis triad (X orange / Y lime / Z cyan) — subtle datum marker
+var ax=[]; seg(ax, 0,0.02,0, 7,0.02,0);
+var axX = lines(ax, COL.orange, .8); scene.add(axX);
+var ay=[]; seg(ay, 0,0,0, 0,6,0);
+scene.add(lines(ay, COL.lime, .7));
+var az=[]; seg(az, 0,0.02,0, 0,0.02,-9);
+scene.add(lines(az, COL.cyan, .8));
+
+/* ================================================================
+   3. HIGHWAY — edge rails, dashed centerline, station ticks
+   ================================================================ */
+var ROAD_END = -1250;
+var rails=[];
+seg(rails, -4,0.02,8,  -4,0.02,ROAD_END);
+seg(rails,  4,0.02,8,   4,0.02,ROAD_END);
+scene.add(lines(rails, COL.blue, .9));
+
+// dashed center lane lines
+var dashGeo = new THREE.BufferGeometry();
+dashGeo.setAttribute('position', new THREE.Float32BufferAttribute([0,0.02,8, 0,0.02,ROAD_END],3));
+var dashMat = new THREE.LineDashedMaterial({ color:COL.cyan, dashSize:2.4, gapSize:3.6, transparent:true, opacity:.85 });
+var dashLine = new THREE.Line(dashGeo, dashMat);
+dashLine.computeLineDistances();
+scene.add(dashLine);
+
+// orange station ticks every 50 units + tiny outboard markers
+var ticks=[];
+for(var z=0; z>ROAD_END; z-=50){
+  seg(ticks, -4.7,0.02,z, -4.0,0.02,z);
+  seg(ticks,  4.0,0.02,z,  4.7,0.02,z);
+}
+scene.add(lines(ticks, COL.orange, .8));
+
+/* ================================================================
+   4. THE CAR — hand-drafted wireframe wedge coupe
+   ================================================================ */
+var car = new THREE.Group();
+
+// body hull (wedge: low nose at -z, tail at +z)
+var body=[];
+var B=[[-1.05,.25, 2.2],[1.05,.25, 2.2],[1.05,.25,-2.2],[-1.05,.25,-2.2]]; // bottom
+var T=[[-1.00,.86, 1.95],[1.00,.86, 1.95],[0.92,.60,-2.2],[-0.92,.60,-2.2]]; // deck
+for(var i=0;i<4;i++){
+  var j=(i+1)%4;
+  seg(body, B[i][0],B[i][1],B[i][2], B[j][0],B[j][1],B[j][2]);
+  seg(body, T[i][0],T[i][1],T[i][2], T[j][0],T[j][1],T[j][2]);
+  seg(body, B[i][0],B[i][1],B[i][2], T[i][0],T[i][1],T[i][2]);
+}
+// hood crease lines
+seg(body, -0.5,.86,1.95, -0.46,.60,-2.2);
+seg(body,  0.5,.86,1.95,  0.46,.60,-2.2);
+car.add(lines(body, COL.cyan, 1));
+
+// cabin / greenhouse
+var cab=[];
+var CB=[[-0.78,.86, 1.55],[0.78,.86, 1.55],[0.70,.86,-0.70],[-0.70,.86,-0.70]];
+var CR=[[-0.60,1.34, 0.95],[0.60,1.34, 0.95],[0.55,1.28,-0.30],[-0.55,1.28,-0.30]];
+for(i=0;i<4;i++){
+  j=(i+1)%4;
+  seg(cab, CB[i][0],CB[i][1],CB[i][2], CB[j][0],CB[j][1],CB[j][2]);
+  seg(cab, CR[i][0],CR[i][1],CR[i][2], CR[j][0],CR[j][1],CR[j][2]);
+  seg(cab, CB[i][0],CB[i][1],CB[i][2], CR[i][0],CR[i][1],CR[i][2]);
+}
+car.add(lines(cab, COL.cyan, .9));
+
+// rear spoiler — lime accent
+var sp=[];
+seg(sp, -0.72,.86,1.95, -0.72,1.18,1.95);
+seg(sp,  0.72,.86,1.95,  0.72,1.18,1.95);
+boxEdges(sp, 0, 1.22, 1.95, 2.05, 0.06, 0.42);
+car.add(lines(sp, COL.lime, .95));
+
+// front + rear light bars
+var lights=[];
+seg(lights, -0.82,.55,-2.21,  -0.32,.55,-2.21);
+seg(lights,  0.32,.55,-2.21,   0.82,.55,-2.21);
+var head = lines(lights, COL.lime, 1); car.add(head);
+var tl=[]; seg(tl, -0.88,.72,2.21, 0.88,.72,2.21);
+car.add(lines(tl, COL.orange, 1));
+
+// wheels — orange wireframe cylinders (10 segments → spoked look)
+var wheels=[];
+function makeWheel(x, z){
+  var g = new THREE.EdgesGeometry(new THREE.CylinderGeometry(0.42, 0.42, 0.34, 10));
+  var w = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color:COL.orange, transparent:true, opacity:.95 }));
+  w.rotation.z = Math.PI/2;
+  var pivot = new THREE.Group();
+  pivot.add(w);
+  pivot.position.set(x, 0.42, z);
+  car.add(pivot);
+  wheels.push(pivot);
+}
+makeWheel(-1.12, -1.40); makeWheel(1.12, -1.40);
+makeWheel(-1.12,  1.45); makeWheel(1.12,  1.45);
+
+scene.add(car);
+
+/* ================================================================
+   5. STOP 1 — THE BLUEPRINT GARAGE (portal frames at z ≈ -185)
+   ================================================================ */
+var garFrames=[], garRoof=[];
+var GZ0=-168, GZ1=-204, GSTEP=6;
+for(z=GZ0; z>=GZ1; z-=GSTEP){
+  seg(garFrames, -6.5,0,z, -6.5,7,z);   // posts
+  seg(garFrames,  6.5,0,z,  6.5,7,z);
+  seg(garFrames, -6.5,7,z,  6.5,7,z);   // top beam
+  seg(garFrames, -6.5,4.6,z, -4.0,7,z); // corner braces
+  seg(garFrames,  6.5,4.6,z,  4.0,7,z);
+}
+scene.add(lines(garFrames, COL.blue, .85));
+// roof purlins — cyan longitudinal chords
+[-6.5,-3.25,0,3.25,6.5].forEach(function(x){ seg(garRoof, x,7,GZ0, x,7,GZ1); });
+seg(garRoof, -6.5,7.4,(GZ0+GZ1)/2, 6.5,7.4,(GZ0+GZ1)/2); // ridge marker
+scene.add(lines(garRoof, COL.cyan, .8));
+// garage apron hatch lines
+var apron=[];
+for(var k=0;k<7;k++){ seg(apron, -6.5+k*2.2,0.02,GZ0+3, -6.5+k*2.2+1.4,0.02,GZ1-3); }
+scene.add(lines(apron, COL.blueDim, .9));
+
+/* ================================================================
+   6. STOP 2 — SHOWCASE TOWERS (hollow billboard frames)
+   ================================================================ */
+function makeTower(zPos, side, accent){
+  var x = side * 11.5;
+  var t=[], a=[];
+  var w=9, h=17, d=2.5;
+  boxEdges(t, x, h/2, zPos, w, h, d);                    // outer shell
+  for(var yy=2.4; yy<h; yy+=2.4){                        // floor lines (road face)
+    seg(t, x-w/2, yy, zPos+d/2*side*-1, x+w/2, yy, zPos+d/2*side*-1);
+  }
+  seg(t, x-w/2,0,zPos, x+w/2,h,zPos);                    // central diagonal brace
+  scene.add(lines(t, COL.blue, .8));
+  // accent: glowing header bar + face frame in the tower's accent color
+  boxEdges(a, x, h+1.2, zPos, w*0.7, 1.4, 0.6);
+  seg(a, x-w/2, 0.02, zPos, x-w/2, h, zPos);
+  seg(a, x+w/2, 0.02, zPos, x+w/2, h, zPos);
+  scene.add(lines(a, accent, .95));
+  // ground callout leader from road edge to tower base
+  var lead=[]; seg(lead, side*4, .02, zPos, x - side*w/2, .02, zPos);
+  scene.add(lines(lead, COL.orange, .55));
+}
+makeTower(-330,  1, COL.cyan);   // Interface
+makeTower(-450, -1, COL.lime);   // Orchestration
+makeTower(-570,  1, COL.orange); // Delivery
+makeTower(-650, -1, COL.cyan);   // Experience log
+
+/* ================================================================
+   7. STOP 3 — CITY GRID CANYON (merged for one draw call per color)
+   ================================================================ */
+var cityBlue=[], cityCyan=[], cityOrange=[], cityLime=[];
+var CITY_Z0=-690, CITY_Z1=-1150;
+var rng = (function(){ var s=42; return function(){ s=(s*16807)%2147483647; return s/2147483647; };})();
+for(z=CITY_Z0; z>CITY_Z1; z-=12){
+  for(var sIdx=0; sIdx<2; sIdx++){
+    var side = sIdx===0 ? -1 : 1;
+    var n = 1 + Math.floor(rng()*2.4);                  // 1–3 towers per row per side
+    for(var b=0;b<n;b++){
+      var depth = (CITY_Z0 - z)/(CITY_Z0 - CITY_Z1);    // 0 near → 1 far
+      var off = 9 + rng()*46;
+      var bx = side*(off + b*13);
+      var bw = 5 + rng()*7;
+      var bh = 7 + rng()*26 + depth*38;                 // canyon gets taller
+      var bd = 5 + rng()*7;
+      var r = rng();
+      var target = r<0.70?cityBlue : r<0.90?cityCyan : r<0.96?cityOrange : cityLime;
+      boxEdges(target, bx, bh/2, z, bw, bh, bd);
+      if(r>=0.70 && r<0.90){                            // cyan towers get floor bands
+        for(var fy=4; fy<bh; fy+=6){ seg(target, bx-bw/2,fy,z+bd/2, bx+bw/2,fy,z+bd/2); }
+      }
+    }
+  }
+}
+scene.add(lines(cityBlue, COL.blue, .55));
+scene.add(lines(cityCyan, COL.cyan, .7));
+scene.add(lines(cityOrange, COL.orange, .8));
+scene.add(lines(cityLime, COL.lime, .8));
+
+// city gate — tall pylon arch at the canyon entrance
+var gate=[];
+seg(gate, -8,0,CITY_Z0+8, -8,26,CITY_Z0+8); seg(gate, 8,0,CITY_Z0+8, 8,26,CITY_Z0+8);
+seg(gate, -8,26,CITY_Z0+8, 8,26,CITY_Z0+8);
+seg(gate, -8,22,CITY_Z0+8, 8,22,CITY_Z0+8);
+scene.add(lines(gate, COL.orange, .9));
+
+/* ================================================================
+   8. SCROLL MAPPING — keyframed station table (with garage dwell)
+   ================================================================ */
+//  p → z piecewise-linear; slow segment 0.155–0.25 = car "stops" in garage
+var KEYS = [
+  [0.00,    0],
+  [0.145, -170],
+  [0.175, -183],   // crawl…
+  [0.25,  -198],   // …through garage
+  [0.34,  -330],
+  [0.46,  -450],
+  [0.58,  -570],
+  [0.69,  -652],
+  [0.78,  -760],
+  [0.90,  -900]
+];
+function zFromP(p){
+  if(p >= 0.90){                                  // final 10%: car accelerates away
+    var t = (p - 0.90) / 0.10;
+    return -900 - 300 * t * t;
+  }
+  for(var i=0;i<KEYS.length-1;i++){
+    if(p <= KEYS[i+1][0]){
+      var a=KEYS[i], b=KEYS[i+1];
+      var t2 = (p - a[0]) / (b[0] - a[0]);
+      return a[1] + (b[1]-a[1]) * t2;
+    }
+  }
+  return -900;
+}
+
+gsap.registerPlugin(ScrollTrigger, ScrollToPlugin);
+var targetP = 0, smoothP = 0;
+ScrollTrigger.create({
+  trigger:'#scroll-space', start:'top top', end:'bottom bottom',
+  onUpdate:function(self){ targetP = self.progress; }
+});
+
+/* ================================================================
+   9. HUD + PANEL WIRING
+   ================================================================ */
+var panels = Array.prototype.map.call(document.querySelectorAll('.panel'), function(el){
+  return { el:el, a:parseFloat(el.dataset.start), b:parseFloat(el.dataset.end), on:false };
+});
+var hero = document.getElementById('hero');
+var bar  = document.getElementById('progress-bar');
+var elX=document.getElementById('cx'), elZ=document.getElementById('cz'),
+    elV=document.getElementById('cv'), elS=document.getElementById('csector');
+var SECTORS = [
+  [0.00,'APPROACH'],[0.125,'GARAGE A-01'],[0.29,'EXPO ROW'],
+  [0.66,'SYSTEMS LOG'],[0.78,'CITY GRID'],[0.90,'EXIT VECTOR']
+];
+function sectorFor(p){
+  var s = SECTORS[0][1];
+  for(var i=0;i<SECTORS.length;i++){ if(p>=SECTORS[i][0]) s=SECTORS[i][1]; }
+  return s;
+}
+function fmt(n, pad){
+  var sgn = n<0?'-':'+';
+  var v = Math.abs(n).toFixed(1);
+  while(v.length < pad) v = '0'+v;
+  return sgn+v;
+}
+
+// nav buttons → smooth scroll to exact Z-station
+function goTo(p){
+  var max = document.documentElement.scrollHeight - window.innerHeight;
+  gsap.to(window, { duration: REDUCED ? 0 : 1.8, ease:'power2.inOut', scrollTo: p*max });
+}
+document.querySelectorAll('nav button').forEach(function(btn){
+  btn.addEventListener('click', function(){ goTo(parseFloat(btn.dataset.target)); });
+});
+document.getElementById('brand-home').addEventListener('click', function(e){ e.preventDefault(); goTo(0); });
+
+/* ================================================================
+   10. RENDER LOOP — chase cam, dwell, exit pan, grid pulse
+   ================================================================ */
+var lastZ = 0, clock = new THREE.Clock();
+var camPos = new THREE.Vector3(0,5.2,12.5), camLook = new THREE.Vector3(0,1,-10);
+var frame = 0;
+
+function tick(){
+  requestAnimationFrame(tick);
+  var dt = Math.min(clock.getDelta(), 0.05);
+  var t  = clock.elapsedTime;
+
+  // scrub smoothing (instant when reduced motion is preferred)
+  smoothP = REDUCED ? targetP : smoothP + (targetP - smoothP) * Math.min(1, dt*4.5);
+  var p  = smoothP;
+  var cz = zFromP(p);
+  var dz = cz - lastZ;
+
+  // ---- car ----
+  var lateral = REDUCED ? 0 : Math.sin(cz * 0.018) * 0.7;     // gentle lane drift
+  if(p > 0.88) lateral *= Math.max(0, 1-(p-0.88)/0.06);        // straighten for exit
+  car.position.set(lateral, REDUCED ? 0 : Math.sin(t*2.2)*0.015, cz);
+  car.rotation.y = REDUCED ? 0 : -Math.cos(cz*0.018)*0.022;   // bank into the lane drift
+  car.rotation.x = REDUCED ? 0 : THREE.MathUtils.clamp(dz*0.5, -0.05, 0.05);
+  for(var i=0;i<wheels.length;i++){ wheels[i].children[0].rotation.x += dz/0.42; }
+
+  // headlight beam flicker with speed
+  head.material.opacity = 0.7 + Math.min(0.3, Math.abs(dz)*2);
+
+  // ---- camera rig ----
+  var exitT = p > 0.90 ? (p-0.90)/0.10 : 0;
+  var px, py, pz, lx, ly, lz;
+  if(exitT > 0){
+    // city exit: camera holds station, lifts, watches the car vanish
+    px = lateral*0.3; py = 5.2 + exitT*8.5; pz = -900 + 14 + exitT*4;
+    lx = car.position.x; ly = 1.0 + exitT*1.5; lz = cz - 6;
+  }else{
+    px = lateral*0.55; py = 5.2; pz = cz + 12.5;
+    lx = lateral*0.8; ly = 1.0; lz = cz - 10;
+  }
+  if(REDUCED){
+    camPos.set(px,py,pz); camLook.set(lx,ly,lz);
+  }else{
+    camPos.lerp(new THREE.Vector3(px,py,pz), Math.min(1, dt*5));
+    camLook.lerp(new THREE.Vector3(lx,ly,lz), Math.min(1, dt*5));
+  }
+  camera.position.copy(camPos);
+  camera.lookAt(camLook);
+
+  // ---- infinite grid: snap-follow + pulse as the car passes ----
+  var snap = Math.round(cz/5)*5;
+  grid.position.z = snap; grid2.position.z = snap;
+  if(!REDUCED){
+    grid.material.opacity  = 0.42 + 0.10*Math.sin(t*2.0 - cz*0.06);
+    grid2.material.opacity = 0.10 + 0.06*Math.sin(t*1.3 + cz*0.04);
+    dashMat.opacity = 0.7 + Math.min(0.3, Math.abs(dz)*3);
+  }
+
+  // ---- HUD (throttled to every other frame) ----
+  if((frame++ & 1) === 0){
+    bar.style.width = (targetP*100).toFixed(2)+'%';
+    elX.textContent = fmt(car.position.x, 6);
+    elZ.textContent = fmt(cz, 7);
+    elV.textContent = Math.min(999.9, Math.abs(dz)/Math.max(dt,0.001)).toFixed(1).padStart(5,'0');
+    elS.textContent = 'SECTOR: ' + sectorFor(p);
+    // hero + panels
+    hero.classList.toggle('hidden', p > 0.055);
+    for(i=0;i<panels.length;i++){
+      var pn = panels[i], on = p >= pn.a && p <= pn.b;
+      if(on !== pn.on){ pn.on = on; pn.el.classList.toggle('visible', on); }
+    }
+  }
+
+  lastZ = cz;
+  renderer.render(scene, camera);
+}
+tick();
+})();
+</script>
+</body>
+</html>

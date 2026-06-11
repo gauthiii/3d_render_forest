@@ -1,0 +1,201 @@
+<h2 class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">An interactive football game where you dribble past defenders to score goals.</h2>
+<div style="display:flex; gap:12px; margin:0 0 12px;">
+  <div style="flex:1; background:var(--color-background-secondary); border-radius:var(--border-radius-md); padding:0.75rem 1rem;">
+    <p style="margin:0; font-size:13px; color:var(--color-text-secondary);">Goals</p>
+    <p style="margin:0; font-size:24px; font-weight:500;" id="score">0</p>
+  </div>
+  <div style="flex:1; background:var(--color-background-secondary); border-radius:var(--border-radius-md); padding:0.75rem 1rem;">
+    <p style="margin:0; font-size:13px; color:var(--color-text-secondary);">Lives</p>
+    <p style="margin:0; font-size:24px; font-weight:500;" id="lives">3</p>
+  </div>
+  <div style="flex:1; background:var(--color-background-secondary); border-radius:var(--border-radius-md); padding:0.75rem 1rem;">
+    <p style="margin:0; font-size:13px; color:var(--color-text-secondary);">Best</p>
+    <p style="margin:0; font-size:24px; font-weight:500;" id="best">0</p>
+  </div>
+</div>
+
+<div style="position:relative; border:0.5px solid var(--color-border-tertiary); border-radius:var(--border-radius-lg); overflow:hidden;">
+  <canvas id="pitch" width="640" height="420" style="display:block; width:100%; height:auto; touch-action:none;"></canvas>
+  <div id="overlay" style="position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; background:rgba(4,52,44,0.55);">
+    <p id="ovTitle" style="margin:0 0 4px; font-size:22px; font-weight:500; color:#E1F5EE;">Football dribble</p>
+    <p id="ovSub" style="margin:0 0 16px; font-size:14px; color:#9FE1CB;">Dodge the defenders, reach the goal</p>
+    <button id="startBtn" style="font-size:15px; padding:8px 20px; background:#E1F5EE; color:#04342C; border:0.5px solid #1D9E75; border-radius:8px; cursor:pointer;">Kick off</button>
+  </div>
+</div>
+
+<div style="display:flex; justify-content:center; gap:8px; margin-top:12px;">
+  <button data-dir="left" class="padBtn" style="width:56px; height:44px;" aria-label="Move left"><i class="ti ti-arrow-left" aria-hidden="true"></i></button>
+  <button data-dir="up" class="padBtn" style="width:56px; height:44px;" aria-label="Move up"><i class="ti ti-arrow-up" aria-hidden="true"></i></button>
+  <button data-dir="down" class="padBtn" style="width:56px; height:44px;" aria-label="Move down"><i class="ti ti-arrow-down" aria-hidden="true"></i></button>
+  <button data-dir="right" class="padBtn" style="width:56px; height:44px;" aria-label="Move right"><i class="ti ti-arrow-right" aria-hidden="true"></i></button>
+</div>
+
+<script>
+const cv = document.getElementById('pitch');
+const ctx = cv.getContext('2d');
+const W = 640, H = 420;
+const overlay = document.getElementById('overlay');
+const ovTitle = document.getElementById('ovTitle');
+const ovSub = document.getElementById('ovSub');
+const startBtn = document.getElementById('startBtn');
+const scoreEl = document.getElementById('score');
+const livesEl = document.getElementById('lives');
+const bestEl = document.getElementById('best');
+
+let player, defenders, score = 0, lives = 3, best = 0, running = false, raf = null, level = 1;
+const keys = {left:false, right:false, up:false, down:false};
+
+function resetPlayer() {
+  player = {x: W/2, y: H - 50, r: 14};
+}
+
+function spawnDefenders() {
+  defenders = [];
+  const count = 4 + Math.min(level, 6);
+  for (let i = 0; i < count; i++) {
+    const laneY = 70 + i * ((H - 160) / count);
+    defenders.push({
+      x: Math.random() * (W - 80) + 40,
+      y: laneY,
+      r: 13,
+      vx: (Math.random() < 0.5 ? -1 : 1) * (1.2 + Math.random() * 1.2 + level * 0.25),
+      chase: Math.random() < 0.35
+    });
+  }
+}
+
+function startGame() {
+  score = 0; lives = 3; level = 1;
+  scoreEl.textContent = '0';
+  livesEl.textContent = '3';
+  resetPlayer();
+  spawnDefenders();
+  overlay.style.display = 'none';
+  running = true;
+  loop();
+}
+
+function endGame() {
+  running = false;
+  cancelAnimationFrame(raf);
+  best = Math.max(best, score);
+  bestEl.textContent = String(best);
+  ovTitle.textContent = 'Full time';
+  ovSub.textContent = 'You scored ' + score + (score === 1 ? ' goal' : ' goals');
+  startBtn.textContent = 'Play again';
+  overlay.style.display = 'flex';
+}
+
+function goal() {
+  score++; level++;
+  scoreEl.textContent = String(score);
+  resetPlayer();
+  spawnDefenders();
+}
+
+function tackled() {
+  lives--;
+  livesEl.textContent = String(lives);
+  if (lives <= 0) { endGame(); return; }
+  resetPlayer();
+}
+
+function update() {
+  const sp = 3.4;
+  if (keys.left) player.x -= sp;
+  if (keys.right) player.x += sp;
+  if (keys.up) player.y -= sp;
+  if (keys.down) player.y += sp;
+  player.x = Math.max(player.r, Math.min(W - player.r, player.x));
+  player.y = Math.max(player.r, Math.min(H - player.r, player.y));
+
+  for (const d of defenders) {
+    if (d.chase && Math.abs(d.y - player.y) < 90) {
+      d.x += Math.sign(player.x - d.x) * Math.abs(d.vx) * 0.8;
+    } else {
+      d.x += d.vx;
+    }
+    if (d.x < d.r + 4 || d.x > W - d.r - 4) d.vx *= -1, d.x = Math.max(d.r + 4, Math.min(W - d.r - 4, d.x));
+    const dx = d.x - player.x, dy = d.y - player.y;
+    if (dx*dx + dy*dy < (d.r + player.r) * (d.r + player.r)) { tackled(); return; }
+  }
+
+  const goalLeft = W/2 - 70, goalRight = W/2 + 70;
+  if (player.y - player.r <= 14 && player.x > goalLeft && player.x < goalRight) goal();
+}
+
+function draw() {
+  ctx.fillStyle = '#0F6E56';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#117a5f';
+  for (let i = 0; i < 7; i++) if (i % 2 === 0) ctx.fillRect(0, i * 60, W, 60);
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(8, 8, W - 16, H - 16);
+  ctx.beginPath(); ctx.arc(W/2, H/2, 50, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(8, H/2); ctx.lineTo(W - 8, H/2); ctx.stroke();
+
+  ctx.fillStyle = '#E1F5EE';
+  ctx.fillRect(W/2 - 70, 4, 140, 10);
+  ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+  ctx.strokeRect(W/2 - 110, 8, 220, 52);
+
+  for (const d of defenders) {
+    ctx.fillStyle = '#E24B4A';
+    ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#FCEBEB';
+    ctx.beginPath(); ctx.arc(d.x, d.y - 3, 4, 0, Math.PI * 2); ctx.fill();
+  }
+
+  ctx.fillStyle = '#378ADD';
+  ctx.beginPath(); ctx.arc(player.x, player.y, player.r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#E6F1FB';
+  ctx.beginPath(); ctx.arc(player.x, player.y - 4, 4.5, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(player.x + 12, player.y + 10, 6, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#2C2C2A'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(player.x + 12, player.y + 10, 6, 0, Math.PI * 2); ctx.stroke();
+}
+
+function loop() {
+  if (!running) return;
+  update();
+  if (running) draw();
+  raf = requestAnimationFrame(loop);
+}
+
+const keyMap = {ArrowLeft:'left', ArrowRight:'right', ArrowUp:'up', ArrowDown:'down', a:'left', d:'right', w:'up', s:'down'};
+window.addEventListener('keydown', e => {
+  const k = keyMap[e.key];
+  if (k) { keys[k] = true; e.preventDefault(); }
+});
+window.addEventListener('keyup', e => {
+  const k = keyMap[e.key];
+  if (k) keys[k] = false;
+});
+
+document.querySelectorAll('.padBtn').forEach(btn => {
+  const dir = btn.dataset.dir;
+  const on = e => { e.preventDefault(); keys[dir] = true; };
+  const off = e => { e.preventDefault(); keys[dir] = false; };
+  btn.addEventListener('pointerdown', on);
+  btn.addEventListener('pointerup', off);
+  btn.addEventListener('pointerleave', off);
+  btn.addEventListener('pointercancel', off);
+});
+
+cv.addEventListener('pointerdown', e => {
+  if (!running) return;
+  const rect = cv.getBoundingClientRect();
+  const tx = (e.clientX - rect.left) / rect.width * W;
+  const ty = (e.clientY - rect.top) / rect.height * H;
+  const dx = tx - player.x, dy = ty - player.y;
+  if (Math.abs(dx) > Math.abs(dy)) { keys[dx > 0 ? 'right' : 'left'] = true; }
+  else { keys[dy > 0 ? 'down' : 'up'] = true; }
+});
+cv.addEventListener('pointerup', () => { keys.left = keys.right = keys.up = keys.down = false; });
+
+startBtn.addEventListener('click', startGame);
+draw();
+</script>

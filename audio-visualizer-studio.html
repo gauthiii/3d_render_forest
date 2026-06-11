@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>WaveCanvas — Audio Visualizer Video Maker</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+  body { font-family: 'Space Grotesk', sans-serif; }
+  .mono { font-family: 'IBM Plex Mono', monospace; }
+  .glow { box-shadow: 0 0 24px rgba(56, 189, 248, 0.18); }
+  input[type="file"] { display: none; }
+  .recording-pulse { animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+</style>
+</head>
+<body class="bg-[#0a0e14] text-slate-200 min-h-screen flex flex-col">
+
+  <!-- Header -->
+  <header class="border-b border-slate-800/80 px-6 py-4 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-sky-400 to-violet-500 flex items-center justify-center">
+        <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+          <path stroke-linecap="round" d="M4 12h2m3-5v10m3-14v18m3-13v8m3-6v4m2 0h0"/>
+        </svg>
+      </div>
+      <div>
+        <h1 class="text-lg font-semibold tracking-tight text-white">WaveCanvas</h1>
+        <p class="text-xs text-slate-500 mono">audio → visualizer → video</p>
+      </div>
+    </div>
+    <div id="status" class="mono text-xs text-slate-500">ready</div>
+  </header>
+
+  <main class="flex-1 flex flex-col lg:flex-row gap-6 p-6 max-w-7xl mx-auto w-full">
+
+    <!-- Left panel: controls -->
+    <aside class="lg:w-80 flex-shrink-0 space-y-4">
+
+      <!-- Uploads -->
+      <section class="bg-[#10151f] rounded-xl border border-slate-800 p-5 space-y-3">
+        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">1 · Source files</h2>
+
+        <label for="audioInput" class="cursor-pointer flex items-center gap-3 bg-slate-800/60 hover:bg-slate-700/60 border border-slate-700 rounded-lg px-4 py-3 transition">
+          <svg class="w-5 h-5 text-sky-400 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19V6l12-2v13M9 19a3 3 0 11-6 0 3 3 0 016 0zm12-3a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+          <div class="min-w-0">
+            <div class="text-sm font-medium text-white">Upload audio</div>
+            <div id="audioName" class="text-xs text-slate-500 truncate">MP3 or WAV</div>
+          </div>
+        </label>
+        <input type="file" id="audioInput" accept="audio/*" />
+
+        <label for="imageInput" class="cursor-pointer flex items-center gap-3 bg-slate-800/60 hover:bg-slate-700/60 border border-slate-700 rounded-lg px-4 py-3 transition">
+          <svg class="w-5 h-5 text-violet-400 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16l4.6-4.6a2 2 0 012.8 0L16 16m-2-2l1.6-1.6a2 2 0 012.8 0L20 14M14 8h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+          <div class="min-w-0">
+            <div class="text-sm font-medium text-white">Upload background</div>
+            <div id="imageName" class="text-xs text-slate-500 truncate">JPG or PNG (optional)</div>
+          </div>
+        </label>
+        <input type="file" id="imageInput" accept="image/*" />
+      </section>
+
+      <!-- Style -->
+      <section class="bg-[#10151f] rounded-xl border border-slate-800 p-5 space-y-3">
+        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">2 · Visualizer style</h2>
+        <div class="grid grid-cols-2 gap-2">
+          <button data-mode="circle" class="modeBtn bg-sky-500/20 border border-sky-500 text-sky-300 rounded-lg py-2 text-sm font-medium transition">Circular wave</button>
+          <button data-mode="bars" class="modeBtn bg-slate-800/60 border border-slate-700 text-slate-400 rounded-lg py-2 text-sm font-medium transition hover:bg-slate-700/60">Classic bars</button>
+        </div>
+      </section>
+
+      <!-- Playback -->
+      <section class="bg-[#10151f] rounded-xl border border-slate-800 p-5 space-y-3">
+        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">3 · Preview</h2>
+        <div class="flex gap-2">
+          <button id="playBtn" disabled class="flex-1 flex items-center justify-center gap-2 bg-sky-500 hover:bg-sky-400 disabled:bg-slate-800 disabled:text-slate-600 text-white rounded-lg py-2.5 text-sm font-semibold transition">
+            <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg> Play
+          </button>
+          <button id="pauseBtn" disabled class="flex-1 flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 disabled:bg-slate-800 disabled:text-slate-600 text-slate-200 rounded-lg py-2.5 text-sm font-semibold transition">
+            <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg> Pause
+          </button>
+        </div>
+        <div class="mono text-xs text-slate-500 flex justify-between">
+          <span id="timeNow">0:00</span><span id="timeTotal">0:00</span>
+        </div>
+        <div class="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+          <div id="progressBar" class="h-full w-0 bg-gradient-to-r from-sky-400 to-violet-500 transition-[width] duration-200"></div>
+        </div>
+      </section>
+
+      <!-- Export -->
+      <section class="bg-[#10151f] rounded-xl border border-slate-800 p-5 space-y-3">
+        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">4 · Export</h2>
+        <button id="exportBtn" disabled class="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-violet-500 to-fuchsia-500 hover:from-violet-400 hover:to-fuchsia-400 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-600 text-white rounded-lg py-3 text-sm font-semibold transition">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 4v12m0 0l-4-4m4 4l4-4"/></svg>
+          <span id="exportLabel">Download video</span>
+        </button>
+        <button id="stopExportBtn" class="hidden w-full bg-rose-500/20 border border-rose-500 text-rose-300 rounded-lg py-2 text-sm font-medium transition hover:bg-rose-500/30">Stop &amp; save now</button>
+        <p class="text-xs text-slate-500 leading-relaxed">Recording plays the full track from the start and captures the canvas + audio in real time. Keep this tab visible while exporting.</p>
+      </section>
+    </aside>
+
+    <!-- Canvas -->
+    <section class="flex-1 flex flex-col">
+      <div class="relative flex-1 bg-[#10151f] rounded-xl border border-slate-800 glow overflow-hidden flex items-center justify-center min-h-[360px]">
+        <canvas id="canvas" width="1280" height="720" class="max-w-full max-h-full rounded-lg"></canvas>
+        <div id="recBadge" class="hidden absolute top-4 left-4 flex items-center gap-2 bg-black/60 backdrop-blur rounded-full px-3 py-1.5">
+          <span class="w-2.5 h-2.5 rounded-full bg-rose-500 recording-pulse"></span>
+          <span class="mono text-xs text-rose-300">REC</span>
+        </div>
+      </div>
+      <p class="mono text-xs text-slate-600 mt-2 text-right">1280 × 720 · 30 fps</p>
+    </section>
+  </main>
+
+<script>
+(() => {
+  // ---------- State ----------
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  let audioEl = null;          // <audio> element
+  let audioCtx = null;         // AudioContext
+  let analyser = null;
+  let sourceNode = null;
+  let recDest = null;          // MediaStreamDestination for recording
+  let bgImage = null;
+  let mode = 'circle';
+  let dataArray = null;
+  let mediaRecorder = null;
+  let recordedChunks = [];
+  let isRecording = false;
+  let smooth = new Float32Array(180); // smoothed values for circle
+
+  const $ = id => document.getElementById(id);
+  const status = msg => $('status').textContent = msg;
+  const fmt = s => isFinite(s) ? `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}` : '0:00';
+
+  // ---------- Audio setup ----------
+  function setupAudioGraph() {
+    if (audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.82;
+    dataArray = new Uint8Array(analyser.frequencyBinCount);
+    recDest = audioCtx.createMediaStreamDestination();
+
+    sourceNode = audioCtx.createMediaElementSource(audioEl);
+    sourceNode.connect(analyser);
+    analyser.connect(audioCtx.destination); // speakers
+    analyser.connect(recDest);              // recorder
+  }
+
+  $('audioInput').addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (audioEl) { audioEl.pause(); URL.revokeObjectURL(audioEl.src); }
+
+    // Reset graph if a previous element existed (MediaElementSource binds once)
+    if (audioCtx) { audioCtx.close(); audioCtx = null; analyser = null; sourceNode = null; recDest = null; }
+
+    audioEl = new Audio(URL.createObjectURL(file));
+    audioEl.crossOrigin = 'anonymous';
+    audioEl.addEventListener('loadedmetadata', () => {
+      $('timeTotal').textContent = fmt(audioEl.duration);
+      $('playBtn').disabled = false;
+      $('pauseBtn').disabled = false;
+      $('exportBtn').disabled = false;
+      status('audio loaded');
+    });
+    audioEl.addEventListener('timeupdate', () => {
+      $('timeNow').textContent = fmt(audioEl.currentTime);
+      $('progressBar').style.width = (audioEl.currentTime / audioEl.duration * 100 || 0) + '%';
+    });
+    audioEl.addEventListener('ended', () => { if (isRecording) stopRecording(); });
+
+    $('audioName').textContent = file.name;
+  });
+
+  $('imageInput').addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const img = new Image();
+    img.onload = () => { bgImage = img; status('background set'); };
+    img.src = URL.createObjectURL(file);
+    $('imageName').textContent = file.name;
+  });
+
+  // ---------- Mode toggle ----------
+  document.querySelectorAll('.modeBtn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      mode = btn.dataset.mode;
+      document.querySelectorAll('.modeBtn').forEach(b => {
+        const active = b === btn;
+        b.className = 'modeBtn rounded-lg py-2 text-sm font-medium transition ' + (active
+          ? 'bg-sky-500/20 border border-sky-500 text-sky-300'
+          : 'bg-slate-800/60 border border-slate-700 text-slate-400 hover:bg-slate-700/60');
+      });
+    });
+  });
+
+  // ---------- Playback ----------
+  $('playBtn').addEventListener('click', async () => {
+    setupAudioGraph();
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+    audioEl.play();
+    status('playing');
+  });
+  $('pauseBtn').addEventListener('click', () => { if (audioEl) { audioEl.pause(); status('paused'); } });
+
+  // ---------- Drawing ----------
+  function drawBackground() {
+    if (bgImage) {
+      // cover-fit
+      const s = Math.max(W / bgImage.width, H / bgImage.height);
+      const w = bgImage.width * s, h = bgImage.height * s;
+      ctx.drawImage(bgImage, (W - w) / 2, (H - h) / 2, w, h);
+      // subtle dark overlay so the visualizer pops
+      ctx.fillStyle = 'rgba(5, 8, 14, 0.35)';
+      ctx.fillRect(0, 0, W, H);
+    } else {
+      const g = ctx.createLinearGradient(0, 0, W, H);
+      g.addColorStop(0, '#0d1320');
+      g.addColorStop(1, '#1a1030');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, W, H);
+    }
+  }
+
+  function drawCircle() {
+    const cx = W / 2, cy = H / 2;
+    const baseR = Math.min(W, H) * 0.18;
+    const N = 180;
+    // average level for inner glow
+    let avg = 0;
+    for (let i = 0; i < dataArray.length; i++) avg += dataArray[i];
+    avg /= dataArray.length;
+
+    // glow core
+    const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, baseR * (1 + avg / 300));
+    glow.addColorStop(0, 'rgba(56,189,248,0.30)');
+    glow.addColorStop(1, 'rgba(56,189,248,0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(cx, cy, baseR * (1 + avg / 200), 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.lineWidth = 3;
+    for (let pass = 0; pass < 2; pass++) {
+      ctx.beginPath();
+      for (let i = 0; i <= N; i++) {
+        const idx = Math.floor(i / N * (dataArray.length * 0.7));
+        const v = dataArray[idx] / 255;
+        smooth[i % N] += (v - smooth[i % N]) * 0.35;
+        const amp = smooth[i % N] * baseR * (pass === 0 ? 0.9 : 0.55);
+        const r = baseR + amp + (pass === 1 ? 14 : 0);
+        const a = (i / N) * Math.PI * 2 - Math.PI / 2;
+        const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      const grad = ctx.createLinearGradient(cx - baseR, cy - baseR, cx + baseR, cy + baseR);
+      if (pass === 0) { grad.addColorStop(0, '#38bdf8'); grad.addColorStop(1, '#a78bfa'); }
+      else { grad.addColorStop(0, 'rgba(167,139,250,0.45)'); grad.addColorStop(1, 'rgba(56,189,248,0.45)'); }
+      ctx.strokeStyle = grad;
+      ctx.stroke();
+    }
+  }
+
+  function drawBars() {
+    const bars = 64;
+    const gap = 6;
+    const totalW = W * 0.7;
+    const bw = (totalW - gap * (bars - 1)) / bars;
+    const x0 = (W - totalW) / 2;
+    const cy = H / 2;
+    const maxH = H * 0.32;
+
+    for (let i = 0; i < bars; i++) {
+      const idx = Math.floor(Math.pow(i / bars, 1.6) * dataArray.length * 0.8);
+      const v = dataArray[idx] / 255;
+      const h = Math.max(4, v * maxH);
+      const x = x0 + i * (bw + gap);
+      const grad = ctx.createLinearGradient(0, cy - h, 0, cy + h);
+      grad.addColorStop(0, '#38bdf8');
+      grad.addColorStop(0.5, '#a78bfa');
+      grad.addColorStop(1, '#f472b6');
+      ctx.fillStyle = grad;
+      // mirrored bars around the center line
+      roundRect(x, cy - h, bw, h, 3);
+      roundRect(x, cy, bw, h, 3);
+    }
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.fill();
+  }
+
+  function render() {
+    drawBackground();
+    if (analyser) {
+      analyser.getByteFrequencyData(dataArray);
+      mode === 'circle' ? drawCircle() : drawBars();
+    } else {
+      // idle hint
+      ctx.fillStyle = 'rgba(148,163,184,0.6)';
+      ctx.font = '500 28px "Space Grotesk", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Upload an audio file and press Play', W / 2, H / 2);
+    }
+    requestAnimationFrame(render);
+  }
+  render();
+
+  // ---------- Export ----------
+  function pickMime() {
+    const candidates = [
+      'video/mp4;codecs=avc1,mp4a.40.2',
+      'video/mp4',
+      'video/webm;codecs=vp9,opus',
+      'video/webm;codecs=vp8,opus',
+      'video/webm'
+    ];
+    return candidates.find(t => MediaRecorder.isTypeSupported(t)) || '';
+  }
+
+  $('exportBtn').addEventListener('click', async () => {
+    if (!audioEl || isRecording) return;
+    setupAudioGraph();
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+    // restart from the beginning for a clean take
+    audioEl.currentTime = 0;
+
+    const canvasStream = canvas.captureStream(30);
+    const combined = new MediaStream([
+      ...canvasStream.getVideoTracks(),
+      ...recDest.stream.getAudioTracks()
+    ]);
+
+    const mime = pickMime();
+    recordedChunks = [];
+    mediaRecorder = new MediaRecorder(combined, { mimeType: mime, videoBitsPerSecond: 6_000_000 });
+    mediaRecorder.ondataavailable = e => { if (e.data.size) recordedChunks.push(e.data); };
+    mediaRecorder.onstop = saveRecording;
+
+    mediaRecorder.start(250);
+    isRecording = true;
+    audioEl.play();
+
+    $('recBadge').classList.remove('hidden');
+    $('stopExportBtn').classList.remove('hidden');
+    $('exportBtn').disabled = true;
+    $('exportLabel').textContent = 'Recording…';
+    status('recording — full track');
+  });
+
+  $('stopExportBtn').addEventListener('click', stopRecording);
+
+  function stopRecording() {
+    if (!isRecording) return;
+    isRecording = false;
+    audioEl.pause();
+    mediaRecorder.stop();
+    $('recBadge').classList.add('hidden');
+    $('stopExportBtn').classList.add('hidden');
+    $('exportBtn').disabled = false;
+    $('exportLabel').textContent = 'Download video';
+    status('encoding…');
+  }
+
+  function saveRecording() {
+    const mime = mediaRecorder.mimeType || 'video/webm';
+    const ext = mime.includes('mp4') ? 'mp4' : 'webm';
+    const blob = new Blob(recordedChunks, { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `visualizer-${Date.now()}.${ext}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    status(`saved as .${ext}`);
+  }
+})();
+</script>
+</body>
+</html>
