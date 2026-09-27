@@ -167,12 +167,12 @@ const HAS_WEBGL2 = (() => {
 const Q = HAS_WEBGL2
   ? { terrainN: 720, grass: 120000, coreTrees: 760, outerTrees: 900, understory: 1100,
       shrubs: 2200, ferns: 3200, rocks: 320, logs: 90, stumps: 60, mushrooms: 700,
-      flowers: 1800, debris: 6000, birds: 40, rain: 10000, splashes: 3000, motes: 2500,
+      flowers: 1800, debris: 6000, birds: 40, rain: 10000, splashes: 3000, motes: 2500, acacias: 60, slopeTrees: 800,
       fireflies: 400, cascades: 3, shadowMap: 2048, ao: true,
       pixelRatio: Math.min(window.devicePixelRatio, 1.5) }
   : { terrainN: 400, grass: 40000, coreTrees: 320, outerTrees: 300, understory: 400,
       shrubs: 800, ferns: 1200, rocks: 140, logs: 40, stumps: 25, mushrooms: 250,
-      flowers: 700, debris: 2000, birds: 24, rain: 3000, splashes: 1000, motes: 800,
+      flowers: 700, debris: 2000, birds: 24, rain: 3000, splashes: 1000, motes: 800, acacias: 40, slopeTrees: 300,
       fireflies: 150, cascades: 2, shadowMap: 1024, ao: false, pixelRatio: 1 };
 
 /* World scale constants (metres) */
@@ -185,8 +185,11 @@ const WATER_LEVEL    = 2.0;   // lowlands below this stay bare (damp hollows)
 
 /* Curved walking trail: strong in the centre, soft at the edges. */
 const PATH_POINTS = [
-  [ 30, 70], [ 8, 34], [-5.5, 11], [-16, -13], [-29, -42], [-12, -78], [18, -112], [26, -150]
+  [ 30, 70], [ 8, 34], [-5.5, 11], [-16, -13], [-29, -42], [-12, -78], [18, -112], [26, -150], [34, -190], [46, -232]
 ];
+/* Pride Rock site: a flattened savanna pocket at the far end of the trail */
+const SAV = { x: 60, z: -285, r: 170 };
+function savannaMask(x, z){ return smoothstepJS(SAV.r + 40, SAV.r - 40, Math.hypot(x - SAV.x, z - SAV.z)); }
 const PATH_CORE_W = 1.6;
 const PATH_EDGE_W = 5.5;
 function pathDistance(x, z){
@@ -221,6 +224,7 @@ const U = {
   uSunColor:     { value: new THREE.Color(1, 1, 1) },
   uSkyLight:     { value: new THREE.Color(0.5, 0.6, 0.8) },   // ambient tint for translucency
   uPath:         { value: PATH_POINTS.map(p => new THREE.Vector2(p[0], p[1])) },
+  uSavanna:      { value: new THREE.Vector3(SAV.x, SAV.z, SAV.r) },
   uCamPos:       { value: new THREE.Vector3() }
 };
 
@@ -300,6 +304,12 @@ const SPLAT_GLSL = /* glsl */`
   rockC = mix(rockC, lichenC, smoothstep(0.55, 0.85, gnoise(cliffUv * 0.35 + 3.0)) * 0.35);
   vec3 screeC = mix(vec3(0.13, 0.125, 0.11), vec3(0.26, 0.245, 0.22), det);
 
+  /* savanna pocket: dry golden-green grass, no duff or moss */
+  float savM = smoothstep(uSavanna.z + 40.0, uSavanna.z - 40.0, length(wp.xz - uSavanna.xy));
+  savM *= smoothstep(0.30, 0.55, 1.0 - slope) * 0.5 + 0.5;
+  vec3 savC = mix(vec3(0.150, 0.165, 0.050), vec3(0.380, 0.340, 0.130), det);
+  savC = mix(savC, vec3(0.42, 0.33, 0.16), smoothstep(0.55, 0.85, gnoise(wp.xz * 0.05 + 9.0)) * 0.5);  // bare dust patches
+
   /* weights */
   float wRock  = smoothstep(0.30, 0.55, slope);
   float wDirt  = smoothstep(0.14, 0.32, slope) * (1.0 - wRock);
@@ -308,10 +318,11 @@ const SPLAT_GLSL = /* glsl */`
   /* forest duff on the flats (the bulk of a woodland floor is brown, not green) */
   float wDuff = smoothstep(0.42, 0.78, gnoise(wp.xz * 0.022 + 7.0) * 0.6 + gnoise(wp.xz * 0.09 - 3.0) * 0.4)
               * smoothstep(0.30, 0.08, slope);
-  col = mix(col, duffC, wDuff * 0.85);
+  col = mix(col, duffC, wDuff * 0.85 * (1.0 - savM));
   /* moss in damp low hollows */
   float wMoss = smoothstep(0.45, 0.80, gnoise(wp.xz * 0.03 - 13.0)) * smoothstep(24.0, 4.0, h);
-  col = mix(col, mossC, wMoss * 0.75);
+  col = mix(col, mossC, wMoss * 0.75 * (1.0 - savM));
+  col = mix(col, savC, savM);
   col = mix(col, dirtC, wDirt);
   /* beyond the instanced tree belt, paint dark forest patches so far hills are not bare lawn */
   float dOrig = length(wp.xz);
@@ -324,7 +335,7 @@ const SPLAT_GLSL = /* glsl */`
 
   /* the trail: compacted dirt, damp centre, ragged edge */
   float pd = 1e9;
-  for (int i = 0; i < 7; i++){
+  for (int i = 0; i < ${PATH_POINTS.length - 1}; i++){
     vec2 a = uPath[i], b = uPath[i + 1];
     vec2 ab = b - a, ap = wp.xz - a;
     float t = clamp(dot(ap, ab) / max(dot(ab, ab), 1e-4), 0.0, 1.0);
@@ -471,7 +482,8 @@ function patchMaterial(mat, opts){
       uniform float uSunI;
       uniform vec3  uSunColor;
       uniform vec3  uSkyLight;
-      uniform vec2  uPath[8];
+      uniform vec2  uPath[${PATH_POINTS.length}];
+      uniform vec3  uSavanna;
       varying vec3  vAerialWorldPos;
       varying vec3  vObjPos;
       varying vec3  vWorldNormal;
@@ -513,8 +525,11 @@ function patchMaterial(mat, opts){
     /* colour fades toward the ground colour with distance so the grass rim never shows */
     if (opts.distFade) shader.fragmentShader = shader.fragmentShader.replace('#include <color_fragment>', `
       #include <color_fragment>
-      diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.085, 0.135, 0.05),
-                             smoothstep(90.0, 260.0, length(vAerialWorldPos - cameraPosition)));`);
+      {
+        float savG = smoothstep(uSavanna.z + 40.0, uSavanna.z - 40.0, length(vAerialWorldPos.xz - uSavanna.xy));
+        vec3 farC = mix(vec3(0.085, 0.135, 0.05), vec3(0.26, 0.24, 0.09), savG);
+        diffuseColor.rgb = mix(diffuseColor.rgb, farC, smoothstep(90.0, 260.0, length(vAerialWorldPos - cameraPosition)));
+      }`);
 
     /* shadow-aware translucency: the sun through a leaf, only where the sun reaches */
     if (opts.sss){
@@ -764,10 +779,25 @@ let simplex, rng;
 function initNoise(seed){
   rng = mulberry32(seed);
   simplex = new SimplexNoise(mulberry32(seed ^ 0x9e3779b9));
+  savPlainH = Math.max(4, rawHeight(SAV.x, SAV.z));
 }
 
 /* SINGLE source of truth for terrain height: used by the mesh AND all placement. */
+let savPlainH = 10;
 function heightFn(x, z){
+  let base = rawHeight(x, z);
+  /* flatten the savanna pocket into a plain with a gentle roll */
+  const sd = Math.hypot(x - SAV.x, z - SAV.z);
+  if (sd < SAV.r + 110){
+    const m = smoothstepJS(SAV.r + 110, SAV.r - 30, sd);
+    base = lerpN(base, savPlainH + simplex.noise2D(x * 0.01 + 5, z * 0.01) * 1.6, m);
+  }
+  base -= pathInfluence(x, z) * 0.35;
+  const d = Math.hypot(x, z);
+  base += smoothstepJS(600, 1400, d) * 60 * (0.6 + 0.4 * simplex.noise2D(x * 0.002 + 9, z * 0.002));
+  return base;
+}
+function rawHeight(x, z){
   const wx = x + simplex.noise2D(x * 0.003 + 31.7, z * 0.003) * 90;
   const wz = z + simplex.noise2D(x * 0.003, z * 0.003 - 12.3) * 90;
   let amp = 1, freq = 0.004, h = 0, norm = 0;
@@ -784,11 +814,6 @@ function heightFn(x, z){
   ridge = Math.pow(ridge, 2.2);
   const mask = smoothstepJS(0.25, 0.75, simplex.noise2D(x * 0.0011 - 50, z * 0.0011 + 50));
   base += ridge * 46 * mask;
-  /* the trail sits in a gentle hollow so it reads as a worn track */
-  base -= pathInfluence(x, z) * 0.35;
-  /* far rim rises into hills so the horizon is never a flat plate */
-  const d = Math.hypot(x, z);
-  base += smoothstepJS(600, 1400, d) * 60 * (0.6 + 0.4 * simplex.noise2D(x * 0.002 + 9, z * 0.002));
   return base;
 }
 function slopeFn(x, z){
@@ -1084,6 +1109,35 @@ rockMat.onBeforeCompile = ((prev) => (shader, r) => {
       diffuseColor.rgb *= stone;
     }`);
 })(rockMat.onBeforeCompile);
+
+/* Pride Rock: warm tan sandstone, horizontal strata, weather streaks, grass on the ledges */
+const prideRockMat = patchMaterial(
+  new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.94, metalness: 0.0 }),
+  { key: 'priderock', wet: { dark: 0.6, rough: 0.5 },
+    bumpExpr: `(gfbm(vec2(vAerialWorldPos.x * 0.5 + vAerialWorldPos.z * 0.5, vAerialWorldPos.y) * 0.25) * 0.5
+               + gnoise(vec2(vAerialWorldPos.x + vAerialWorldPos.z, vAerialWorldPos.y * 3.0) * 0.9) * 0.25
+               + gnoise(vAerialWorldPos.xz * 2.5) * 0.12) * 0.45
+               * (1.0 - smoothstep(60.0, 260.0, length(vAerialWorldPos - cameraPosition)))` });
+prideRockMat.onBeforeCompile = ((prev) => (shader, r) => {
+  prev(shader, r);
+  shader.fragmentShader = shader.fragmentShader.replace('#include <color_fragment>', `
+    #include <color_fragment>
+    {
+      vec3 wp = vAerialWorldPos;
+      float up = clamp(vWorldNormal.y, 0.0, 1.0);
+      vec2 cu = vec2(wp.x * 0.5 + wp.z * 0.5, wp.y);
+      float tone = gfbm(cu * 0.12) * 0.6 + gnoise(cu * 0.6) * 0.4;
+      float strata = smoothstep(0.40, 0.60, gnoise(vec2(wp.y * 0.30 + wp.x * 0.05 + gnoise(wp.xz * 0.02) * 3.0, (wp.x + wp.z) * 0.012)));
+      vec3 rock = mix(vec3(0.20, 0.11, 0.07), vec3(0.47, 0.30, 0.19), tone);
+      rock *= mix(1.0, 0.58, strata);
+      float streak = smoothstep(0.5, 0.9, gnoise(vec2((wp.x + wp.z) * 0.22, wp.y * 0.035)));
+      rock *= mix(1.0, 0.84, streak * (1.0 - up));
+      float grassy = smoothstep(0.45, 0.80, up) * smoothstep(50.0, 28.0, vObjPos.y)
+                   * (0.35 + 0.65 * smoothstep(0.0, 20.0, vObjPos.x)) * smoothstep(0.25, 0.60, gnoise(wp.xz * 0.15));
+      rock = mix(rock, vec3(0.17, 0.20, 0.07), grassy * 0.85);
+      diffuseColor.rgb *= rock;
+    }`);
+})(prideRockMat.onBeforeCompile);
 
 const mushroomMat = patchMaterial(
   new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.7, vertexColors: true }),
@@ -1449,7 +1503,7 @@ function buildTrees(){
   const S = { broad: mk(variants.broad, trunkMat, broadleafMat), broadLod: mk(variants.broadLod, trunkMat, broadleafMat),
               pine: mk(variants.pine, trunkMat, pineMat), pineLod: mk(variants.pineLod, trunkMat, pineMat) };
 
-  const okTree = ([x, z]) => { const h = heightFn(x, z); return h > 2.5 && h < 48 && slopeFn(x, z) < 0.5 && pathDistance(x, z) > 3.2; };
+  const okTree = ([x, z]) => { const h = heightFn(x, z); return h > 2.5 && h < 48 && slopeFn(x, z) < 0.5 && pathDistance(x, z) > 3.2 && rng() > savannaMask(x, z); };
   const isPine = (x, z, h) => simplex.noise2D(x * 0.008 + 3, z * 0.008 - 5) > 0.22 || h > 30;
 
   /* dense core */
@@ -1503,7 +1557,7 @@ function buildUnderstory(){
     const x = (rng() * 2 - 1) * (CORE_R + 60), z = (rng() * 2 - 1) * (CORE_R + 60);
     const d = Math.hypot(x, z);
     if (d > CORE_R + 60) continue;
-    if (pathDistance(x, z) < 3.0 || nearestTrunk(x, z) < 1.8) continue;
+    if (pathDistance(x, z) < 3.0 || nearestTrunk(x, z) < 1.8 || rng() < savannaMask(x, z)) continue;
     const cl = simplex.noise2D(x * 0.02 + 40, z * 0.02 - 21);
     if (rng() > smoothstepJS(-0.4, 0.6, cl) * smoothstepJS(CORE_R + 60, 80, d) + 0.08) continue;
     const h = heightFn(x, z);
@@ -1527,7 +1581,7 @@ function buildUnderstory(){
     const d = Math.hypot(x, z);
     if (d > CORE_R + 90) continue;
     const pd = pathDistance(x, z);
-    if (pd < 1.6 || nearestTrunk(x, z) < 0.9) continue;
+    if (pd < 1.6 || nearestTrunk(x, z) < 0.9 || rng() < savannaMask(x, z)) continue;
     const cl = simplex.noise2D(x * 0.03 - 60, z * 0.03 + 33);
     let p = smoothstepJS(-0.5, 0.7, cl) * smoothstepJS(CORE_R + 90, 60, d);
     if (pd < 6) p += 0.35;                                   // trail edges are overgrown
@@ -1553,7 +1607,7 @@ function buildFerns(){
     const d = Math.hypot(x, z);
     if (d > CORE_R + 100) continue;
     const pd = pathDistance(x, z);
-    if (pd < 1.3) continue;
+    if (pd < 1.3 || rng() < savannaMask(x, z)) continue;
     const h = heightFn(x, z);
     if (h < WATER_LEVEL || slopeFn(x, z) > 0.5) continue;
     const nt = nearestTrunk(x, z);
@@ -1603,27 +1657,29 @@ function makeClumpGeo(variant){
   }
   return mergeGeometries(blades);
 }
-function buildGrass(){
+function buildGrassField(cx, cz, R, chunks, total, share, savanna){
   const clumpGeos = [makeClumpGeo(0), makeClumpGeo(1), makeClumpGeo(2)];
-  const share = [0.40, 0.15, 0.45];
-  const perChunk = Math.floor(Q.grass / (GRASS_CHUNKS * GRASS_CHUNKS));
-  const chunkSize = (GRASS_R * 2) / GRASS_CHUNKS;
-  for (let cx = 0; cx < GRASS_CHUNKS; cx++)
-  for (let cz = 0; cz < GRASS_CHUNKS; cz++){
-    const ox = -GRASS_R + cx * chunkSize, oz = -GRASS_R + cz * chunkSize;
+  const perChunk = Math.floor(total / (chunks * chunks));
+  const chunkSize = (R * 2) / chunks;
+  for (let ix = 0; ix < chunks; ix++)
+  for (let iz = 0; iz < chunks; iz++){
+    const ox = cx - R + ix * chunkSize, oz = cz - R + iz * chunkSize;
     for (let v = 0; v < 3; v++){
       const cap = Math.ceil(perChunk * share[v]);
       const imesh = new THREE.InstancedMesh(clumpGeos[v], grassMat, cap);
       let n = 0, attempts = 0;
       while (n < cap && attempts++ < cap * 4){
         const x = ox + rng() * chunkSize, z = oz + rng() * chunkSize;
-        const d = Math.hypot(x, z);
-        if (d > GRASS_R) continue;
+        const d = Math.hypot(x - cx, z - cz);
+        if (d > R) continue;
+        const sm = savannaMask(x, z);
+        if (savanna ? rng() > sm : rng() < sm) continue;
+        if (savanna && prideFootprint(x, z)) continue;
         const pd = pathDistance(x, z);
         const cl = simplex.noise2D(x * 0.03 + 11, z * 0.03 - 7);
-        let p = smoothstepJS(GRASS_R, GRASS_R * 0.55, d) * smoothstepJS(-0.55, 0.45, cl) * 0.95 + 0.05;
+        let p = smoothstepJS(R, R * 0.55, d) * smoothstepJS(-0.55, 0.45, cl) * 0.95 + 0.05;
         const nt = nearestTrunk(x, z);
-        if (nt < 3.5) p *= 0.45;                       // bare duff around trunks
+        if (nt < 3.5) p *= 0.45;
         if (pd < PATH_CORE_W) { if (v !== 2 || rng() < 0.85) continue; }
         else if (pd < PATH_EDGE_W) p *= lerpN(0.25, 1.0, (pd - PATH_CORE_W) / (PATH_EDGE_W - PATH_CORE_W));
         if (rng() > p) continue;
@@ -1632,11 +1688,12 @@ function buildGrass(){
         _d.position.set(x, h - 0.02, z);
         _d.rotation.set((rng() - 0.5) * 0.25, rng() * Math.PI * 2, (rng() - 0.5) * 0.25);
         const s = 0.7 + rng() * 0.8;
-        _d.scale.set(s, s * (0.8 + rng() * 0.5) * (pd < PATH_EDGE_W ? 0.6 : 1), s);
+        _d.scale.set(s, s * (0.8 + rng() * 0.5) * (pd < PATH_EDGE_W ? 0.6 : 1) * (savanna ? 1.25 : 1), s);
         _d.updateMatrix();
         imesh.setMatrixAt(n, _d.matrix);
         const dry = clamp01(simplex.noise2D(x * 0.02 - 31, z * 0.02 + 19) * 0.5 + 0.5);
-        _c.setHSL(lerpN(0.27, 0.19, dry * dry), lerpN(0.55, 0.40, dry), 0.40 + rng() * 0.14);
+        if (savanna) _c.setHSL(lerpN(0.16, 0.12, dry), lerpN(0.55, 0.45, dry), 0.42 + rng() * 0.14);
+        else _c.setHSL(lerpN(0.27, 0.19, dry * dry), lerpN(0.55, 0.40, dry), 0.40 + rng() * 0.14);
         imesh.setColorAt(n, _c);
         n++;
       }
@@ -1648,6 +1705,10 @@ function buildGrass(){
       worldGroup.add(imesh);
     }
   }
+}
+function buildGrass(){
+  buildGrassField(0, 0, GRASS_R, GRASS_CHUNKS, Math.floor(Q.grass * 0.66), [0.40, 0.15, 0.45], false);
+  buildGrassField(SAV.x, SAV.z, SAV.r + 30, 6, Math.floor(Q.grass * 0.34), [0.30, 0.50, 0.20], true);
 }
 
 /* ------------------------ logs, stumps, rocks, mushrooms -------------------------- */
@@ -1667,7 +1728,7 @@ function buildDeadwood(){
   let n = 0, attempts = 0;
   while (n < Q.logs && attempts++ < Q.logs * 60){
     const x = (rng() * 2 - 1) * CORE_R, z = (rng() * 2 - 1) * CORE_R;
-    if (Math.hypot(x, z) > CORE_R || pathDistance(x, z) < 4.5 || nearestTrunk(x, z) < 1.5) continue;
+    if (Math.hypot(x, z) > CORE_R || pathDistance(x, z) < 4.5 || nearestTrunk(x, z) < 1.5 || savannaMask(x, z) > 0.3) continue;
     const h = heightFn(x, z);
     if (h < WATER_LEVEL || slopeFn(x, z) > 0.28) continue;
     const g = logs[Math.floor(rng() * logs.length)];
@@ -1685,7 +1746,7 @@ function buildDeadwood(){
   n = 0; attempts = 0;
   while (n < Q.stumps && attempts++ < Q.stumps * 60){
     const x = (rng() * 2 - 1) * CORE_R, z = (rng() * 2 - 1) * CORE_R;
-    if (Math.hypot(x, z) > CORE_R || pathDistance(x, z) < 2.5 || nearestTrunk(x, z) < 1.2) continue;
+    if (Math.hypot(x, z) > CORE_R || pathDistance(x, z) < 2.5 || nearestTrunk(x, z) < 1.2 || savannaMask(x, z) > 0.3) continue;
     const h = heightFn(x, z);
     if (h < WATER_LEVEL || slopeFn(x, z) > 0.4) continue;
     stumps.add(placeAt(x, z, -0.05, rng() * Math.PI * 2, 0.7 + rng() * 0.8, 0.6 + rng() * 0.9));
@@ -1714,7 +1775,7 @@ function buildRocks(){
     const x = (rng() * 2 - 1) * OUTER_R, z = (rng() * 2 - 1) * OUTER_R;
     const sl = slopeFn(x, z);
     if (rng() > Math.min(1, sl * 1.6 + 0.10)) continue;
-    if (pathDistance(x, z) < 2.0 || nearestTrunk(x, z) < 1.0) continue;
+    if (pathDistance(x, z) < 2.0 || nearestTrunk(x, z) < 1.0 || prideFootprint(x, z)) continue;
     const h = heightFn(x, z);
     if (h < WATER_LEVEL) continue;
     const s = 0.4 + Math.pow(rng(), 2.2) * 3.2;
@@ -1741,7 +1802,7 @@ function buildMushrooms(){
   while (n < Q.mushrooms && attempts++ < Q.mushrooms * 40){
     const x = (rng() * 2 - 1) * CORE_R, z = (rng() * 2 - 1) * CORE_R;
     const nt = nearestTrunk(x, z);
-    if (nt > 2.6 || nt < 0.15 || pathDistance(x, z) < 1.2) continue;
+    if (nt > 2.6 || nt < 0.15 || pathDistance(x, z) < 1.2 || savannaMask(x, z) > 0.3) continue;
     const h = heightFn(x, z);
     if (h < WATER_LEVEL || slopeFn(x, z) > 0.45) continue;
     const g = sc[Math.floor(rng() * sc.length)];
@@ -1766,7 +1827,7 @@ function buildFlowers(){
     const x = (rng() * 2 - 1) * GRASS_R, z = (rng() * 2 - 1) * GRASS_R;
     if (Math.hypot(x, z) > GRASS_R * 0.9) continue;
     if (simplex.noise2D(x * 0.025 + 40, z * 0.025 - 40) < 0.3) continue;   // patches in the gaps
-    if (nearestTrunk(x, z) < 2.5 || pathDistance(x, z) < 1.0) continue;
+    if (nearestTrunk(x, z) < 2.5 || pathDistance(x, z) < 1.0 || savannaMask(x, z) > 0.3) continue;
     const h = heightFn(x, z);
     if (h < WATER_LEVEL || slopeFn(x, z) > 0.4) continue;
     sc.add(placeAt(x, z, 0, rng() * Math.PI, 0.6 + rng() * 0.8));
@@ -1785,6 +1846,7 @@ function buildLitter(){
     if (h < WATER_LEVEL) continue;
     const nt = nearestTrunk(x, z);
     if (nt > 9 && rng() < 0.3) continue;
+    if (rng() < savannaMask(x, z)) continue;
     _d.position.set(x, h + 0.012, z);
     _d.rotation.set(-Math.PI / 2 + (rng() - 0.5) * 0.15, 0, rng() * Math.PI * 2);
     const s = 0.7 + rng() * 1.6;
@@ -1795,6 +1857,272 @@ function buildLitter(){
     n++;
   }
   sc.build(worldGroup);
+}
+
+/* =================================== Pride Rock ==================================== */
+/* Local frame: origin at the spire base, +x runs along the rear slope, -x toward the
+   promontory. World placement puts the promontory on the viewer's left when arriving
+   along the trail from the north. */
+const PR = { x: SAV.x, z: SAV.z, yOff: -2.5 };
+/* the rear slope: a straight crest running from the spire's shoulder down to +x, with
+   a rounded triangular cross-section; the same function places the slope's trees */
+const RIDGE = { x0: -14, L: 122, H: 49, cz: 3 };
+function ridgeHeight(lx, lz){
+  const t = (lx - RIDGE.x0) / RIDGE.L;
+  if (t < 0 || t > 1) return -10;
+  const w = 30 - 11 * t;
+  const u = Math.abs(lz - RIDGE.cz) / w;
+  if (u > 1) return -10;
+  const h = RIDGE.H * Math.pow(1 - t, 1.25) * Math.pow(1 - u, 0.8);
+  return h - 3 + simplex.noise2D(lx * 0.06, lz * 0.06) * 1.8 * (1 - t) + simplex.noise2D(lx * 0.2, lz * 0.2) * 0.5;
+}
+/* true if a world point lies on the rock's footprint (spire, slab, ledges or ridge) */
+function prideFootprint(x, z){
+  const lx = x - PR.x, lz = z - PR.z;
+  if (lx > -80 && lx < 12 && lz > -34 && lz < 34) return true;
+  return ridgeHeight(lx, lz) > 0.3;
+}
+function loftGeo(rings, segs){
+  const pos = [], uv = [], idx = [];
+  rings.forEach((r, i) => {
+    for (let s = 0; s <= segs; s++){
+      const a = s / segs * Math.PI * 2;
+      pos.push(r.cx + Math.cos(a) * r.rx, r.y, r.cz + Math.sin(a) * r.rz);
+      uv.push(s / segs, i / (rings.length - 1));
+    }
+  });
+  for (let i = 0; i < rings.length - 1; i++) for (let s = 0; s < segs; s++){
+    const a = i * (segs + 1) + s, b = a + 1, c = a + segs + 1, d = c + 1;
+    idx.push(a, c, b, b, c, d);
+  }
+  /* cap */
+  const top = rings[rings.length - 1], capI = pos.length / 3;
+  pos.push(top.cx, top.y + 0.5, top.cz); uv.push(0.5, 1);
+  const base = (rings.length - 1) * (segs + 1);
+  for (let s = 0; s < segs; s++) idx.push(base + s, base + s + 1, capI);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+function displace(g, amp, freq, seedOff, amp2 = 0.3){
+  const p = g.attributes.position, n = g.attributes.normal;
+  for (let i = 0; i < p.count; i++){
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+    const d = simplex.noise3D(x * freq + seedOff, y * freq, z * freq) * amp
+            + simplex.noise3D(x * freq * 3.1, y * freq * 3.1 + seedOff, z * freq * 3.1) * amp * amp2;
+    p.setXYZ(i, x + n.getX(i) * d, y + n.getY(i) * d, z + n.getZ(i) * d);
+  }
+  g.computeVertexNormals();
+  return g;
+}
+function buildPrideRock(){
+  const parts = [];
+  /* 1. the spire: lofted rings leaning toward -x, ragged with noise */
+  const keyRings = [
+    { y: -8, rx: 34, rz: 20, cx: 0,   cz: 0 },
+    { y:  6, rx: 30, rz: 17, cx: 1,   cz: 0 },
+    { y: 18, rx: 25, rz: 14, cx: 0,   cz: 1 },
+    { y: 30, rx: 20, rz: 11.5, cx: -4, cz: 1 },
+    { y: 42, rx: 15, rz: 9,  cx: -9,  cz: 1 },
+    { y: 52, rx: 10.5, rz: 7, cx: -14, cz: 0 },
+    { y: 60, rx: 7,  rz: 5,  cx: -18, cz: 0 },
+    { y: 66, rx: 4,  rz: 3.2, cx: -21, cz: 0 },
+    { y: 71, rx: 1.2, rz: 1.0, cx: -23, cz: 0 }
+  ];
+  /* interpolate to many thin rings so the silhouette is smooth */
+  const rings = [];
+  for (let i = 0; i < keyRings.length - 1; i++){
+    const a = keyRings[i], b = keyRings[i + 1];
+    for (let s = 0; s < 4; s++){
+      const t = s / 4, e = t * t * (3 - 2 * t);
+      rings.push({ y: lerpN(a.y, b.y, t), rx: lerpN(a.rx, b.rx, e), rz: lerpN(a.rz, b.rz, e), cx: lerpN(a.cx, b.cx, e), cz: lerpN(a.cz, b.cz, e) });
+    }
+  }
+  rings.push(keyRings[keyRings.length - 1]);
+  parts.push(displace(loftGeo(rings, 96), 1.6, 0.05, 3.0, 0.35));
+
+  /* 2. the rear slope: heightfield patch over the ridge function */
+  {
+    const W = 136, D = 76, nx = 110, nz = 62;
+    const ridge = new THREE.PlaneGeometry(W, D, nx, nz);
+    ridge.rotateX(-Math.PI / 2);
+    ridge.translate(RIDGE.x0 + W / 2 - 8, 0, RIDGE.cz);
+    const p = ridge.attributes.position;
+    for (let i = 0; i < p.count; i++){
+      const lx = p.getX(i), lz = p.getZ(i);
+      p.setY(i, Math.max(ridgeHeight(lx, lz), -6));
+    }
+    ridge.computeVertexNormals();
+    parts.push(ridge);
+  }
+  /* 3. the promontory: a long tapered slab from the spire face out to -x, tilted up slightly */
+  {
+    const slab = new THREE.BoxGeometry(56, 9, 22, 22, 3, 7);
+    const p = slab.attributes.position;
+    for (let i = 0; i < p.count; i++){
+      const x = p.getX(i), y = p.getY(i), t = (x + 28) / 56;  // 0 at the tip, 1 at the root
+      /* flat top, underside rising toward the tip: a wedge, not a plank */
+      p.setY(i, y > 0 ? y * 0.9 : y * (0.35 + 0.65 * t));
+      p.setZ(i, p.getZ(i) * (0.70 + 0.30 * t));
+    }
+    slab.computeVertexNormals();
+    displace(slab, 1.0, 0.10, 11.0, 0.4);
+    slab.rotateZ(0.06);
+    slab.translate(-36, 42, 2);
+    parts.push(slab);
+  }
+  /* 4. the pillar under the promontory */
+  {
+    const pil = new THREE.CylinderGeometry(6.2, 8.6, 44, 10, 8);
+    displace(pil, 1.3, 0.12, 17.0, 0.4);
+    pil.rotateZ(-0.03);
+    pil.translate(-45, 16, 3);
+    parts.push(pil);
+  }
+  /* 5. stacked base ledges and boulders */
+  const ledge = (w, h, d, x, y, z, ry, rz) => {
+    const g = new THREE.BoxGeometry(w, h, d, 10, 3, 6);
+    displace(g, 0.7, 0.16, x + y, 0.4);
+    g.rotateZ(rz); g.rotateY(ry);
+    g.translate(x, y, z);
+    parts.push(g);
+  };
+  ledge(38, 5.5, 26, -24, 2.5, 9, 0.18, -0.04);
+  ledge(28, 5, 20, -34, 7.5, -3, -0.22, 0.03);
+  ledge(20, 4, 15, -13, 11, 17, 0.35, 0.0);
+  ledge(24, 4.5, 16, -58, 1.5, 12, 0.5, 0.02);
+  const boulder = (r, x, y, z, s) => {
+    const g = new THREE.SphereGeometry(r, 28, 18);          // indexed, unlike icosahedra
+    g.scale(1.25, 0.8, 1.0);
+    displace(g, r * 0.22, 0.5 / r, s, 0.4);
+    g.rotateY(s); g.translate(x, y, z);
+    parts.push(g);
+  };
+  boulder(7, -18, 3, 22, 1.0); boulder(5, -66, 1, -6, 2.0); boulder(4, 8, 2, 28, 3.0);
+  boulder(6, -30, 2, -22, 4.0); boulder(3.5, -72, 0.5, 18, 5.0); boulder(9, 26, 0, -30, 6.0);
+
+  const geo = mergeGeometries(parts, false);
+  const mesh = new THREE.Mesh(geo, prideRockMat);
+  mesh.position.set(PR.x, savPlainH + PR.yOff, PR.z);
+  mesh.castShadow = mesh.receiveShadow = true;
+  worldGroup.add(mesh);
+}
+
+/* ------------------------------- acacia trees -------------------------------------- */
+/* Short forking trunk, branches sweeping out and up, and a flat umbrella crown of
+   horizontal leaf cards. */
+function growAcacia(rand, spec){
+  const cyls = [], cards = [];
+  const H = spec.height, R = spec.crownR;
+  const forkY = H * 0.32;
+  cyls.push(cylBetween(V3(0, -0.3, 0), V3((rand() - 0.5) * 0.4, forkY, (rand() - 0.5) * 0.4), spec.r, spec.r * 0.75, 8, 0, 0.1));
+  const nB = 4 + Math.floor(rand() * 3);
+  const crownC = V3(0, H, 0);
+  for (let b = 0; b < nB; b++){
+    const a = b / nB * Math.PI * 2 + rand() * 0.8;
+    let p = V3(0, forkY, 0), r = spec.r * 0.55;
+    let dir = V3(Math.cos(a) * 0.8, 1.0, Math.sin(a) * 0.8).normalize();
+    const segs = 4;
+    const reach = R * (0.55 + rand() * 0.5);
+    for (let s = 0; s < segs; s++){
+      const t = (s + 1) / segs;
+      /* sweep outward then flatten toward the crown plane */
+      dir.y = lerpN(1.0, 0.15, t) + (rand() - 0.5) * 0.2;
+      dir.x = Math.cos(a) * lerpN(0.8, 1.3, t) + (rand() - 0.5) * 0.3;
+      dir.z = Math.sin(a) * lerpN(0.8, 1.3, t) + (rand() - 0.5) * 0.3;
+      dir.normalize();
+      const len = (H - forkY) * 0.42 * (1 - t * 0.25) + reach * 0.22;
+      const np = p.clone().addScaledVector(dir, len);
+      cyls.push(cylBetween(p, np, r, r * 0.6, 6, 0, r));
+      /* twigs holding leaf cards near the top of the crown */
+      if (s >= 2){
+        const nC = 5 + Math.floor(rand() * 3);
+        for (let c = 0; c < nC; c++){
+          const cp = np.clone().add(V3((rand() - 0.5) * R * 0.5, (rand() - 0.5) * 1.2 + 0.6, (rand() - 0.5) * R * 0.5));
+          cp.y = Math.min(cp.y, H + 0.6);
+          const card = new THREE.PlaneGeometry(spec.card * (0.8 + rand() * 0.5), spec.card * (0.8 + rand() * 0.5));
+          card.rotateX(-Math.PI / 2 + (rand() - 0.5) * 0.5);
+          card.rotateY(rand() * Math.PI * 2);
+          card.translate(cp.x, cp.y, cp.z);
+          const nn = card.attributes.normal, pp = card.attributes.position;
+          for (let k = 0; k < pp.count; k++){
+            const o = V3(pp.getX(k) - crownC.x, 3.0, pp.getZ(k) - crownC.z).normalize();
+            nn.setXYZ(k, o.x, o.y, o.z);
+          }
+          cards.push(card);
+        }
+      }
+      p = np; r *= 0.62;
+    }
+  }
+  /* the umbrella: a dense flat disc of cards over the whole crown */
+  const nDisc = Math.round(spec.disc);
+  for (let i = 0; i < nDisc; i++){
+    const rr = R * Math.sqrt(rand()) * 1.05, a = rand() * Math.PI * 2;
+    const cp = V3(Math.cos(a) * rr, H + 0.3 - (rr / R) * (rr / R) * 1.4 + (rand() - 0.5) * 0.8, Math.sin(a) * rr);
+    const card = new THREE.PlaneGeometry(spec.card * (0.8 + rand() * 0.5), spec.card * (0.8 + rand() * 0.5));
+    card.rotateX(-Math.PI / 2 + (rand() - 0.5) * 0.6);
+    card.rotateY(rand() * Math.PI * 2);
+    card.translate(cp.x, cp.y, cp.z);
+    const nn = card.attributes.normal, pp = card.attributes.position;
+    for (let k = 0; k < pp.count; k++){
+      const o = V3(pp.getX(k), 2.5, pp.getZ(k)).normalize();
+      nn.setXYZ(k, o.x, o.y, o.z);
+    }
+    cards.push(card);
+  }
+  return { trunk: safeMerge(cyls), leaves: safeMerge(cards) };
+}
+function buildAcacias(){
+  const gr = mulberry32(6161);
+  const specs = [];
+  for (let i = 0; i < 4; i++) specs.push(growAcacia(mulberry32(1200 + i), {
+    height: 7 + gr() * 3.5, crownR: 5 + gr() * 2.5, r: 0.28 + gr() * 0.12, card: 2.3, disc: 46 }));
+  const small = [];
+  for (let i = 0; i < 3; i++) small.push(growAcacia(mulberry32(1300 + i), {
+    height: 2.2 + gr() * 1.2, crownR: 1.5 + gr() * 0.9, r: 0.09, card: 0.9, disc: 14 }));
+  const big = specs.map(v => ({ trunk: new Scatter(v.trunk, trunkMat, 140, { layer: 0 }), leaves: new Scatter(v.leaves, broadleafMat, 140, { layer: 2 }) }));
+  const sm = small.map(v => ({ trunk: new Scatter(v.trunk, trunkMat, 140, { layer: 1 }), leaves: new Scatter(v.leaves, broadleafMat, 140, { layer: 3 }) }));
+
+  /* scattered on the plain, never on the rock footprint or the trail */
+  let cand = poissonDisk(27, SAV.r + 10, rng).map(p => [p[0] + SAV.x, p[1] + SAV.z])
+    .filter(([x, z]) => savannaMask(x, z) > 0.55 && !prideFootprint(x, z) && pathDistance(x, z) > 6 && slopeFn(x, z) < 0.4);
+  cand = cand.slice(0, Q.acacias);
+  for (const [x, z] of cand){
+    const v = big[Math.floor(rng() * big.length)];
+    const s = 0.8 + rng() * 0.6;
+    const m = placeAt(x, z, -0.1, rng() * Math.PI * 2, s, s * (0.9 + rng() * 0.3));
+    v.trunk.add(m);
+    _c.setHSL(0.21 + rng() * 0.05, 0.42, 0.30 + rng() * 0.10);
+    v.leaves.add(m, _c);
+    registerTree(x, z, 0.35);
+  }
+  /* the tree-dotted rear slope of the rock: small acacias where the ridge is gentle */
+  let n = 0, attempts = 0;
+  const base = savPlainH + PR.yOff;
+  while (n < Q.slopeTrees && attempts++ < Q.slopeTrees * 40){
+    const lx = 6 + rng() * 104, lz = -28 + rng() * 60;
+    const y = ridgeHeight(lx, lz);
+    if (y < 0.5) continue;
+    const sx = (ridgeHeight(lx + 1, lz) - ridgeHeight(lx - 1, lz)) * 0.5;
+    const sz = (ridgeHeight(lx, lz + 1) - ridgeHeight(lx, lz - 1)) * 0.5;
+    if (Math.hypot(sx, sz) > 1.8) continue;
+    if (rng() < 0.1) continue;
+    const v = sm[Math.floor(rng() * sm.length)];
+    const s = 0.4 + rng() * 0.5;
+    _d.position.set(PR.x + lx, base + y - 0.15, PR.z + lz);
+    _d.rotation.set((rng() - 0.5) * 0.15, rng() * Math.PI * 2, (rng() - 0.5) * 0.15);
+    _d.scale.set(s, s * (0.9 + rng() * 0.3), s);
+    _d.updateMatrix();
+    v.trunk.add(_d.matrix);
+    _c.setHSL(0.22 + rng() * 0.05, 0.42, 0.28 + rng() * 0.10);
+    v.leaves.add(_d.matrix, _c);
+    n++;
+  }
+  for (const v of [...big, ...sm]){ v.trunk.build(worldGroup); v.leaves.build(worldGroup); }
 }
 
 /* full rebuild on reseed: dispose all world geometry, keep shared materials */
@@ -1808,7 +2136,9 @@ function rebuildWorld(seed){
   treeGrid = new Map();
   const T0 = performance.now();
   buildTerrain();
+  buildPrideRock();
   buildTrees();
+  buildAcacias();
   buildDeadwood();
   buildUnderstory();
   buildFerns();
@@ -2253,6 +2583,13 @@ gui.add(params, 'wind', 0, 3, 0.01).name('Wind');
 gui.add(params, 'mist', 0, 1, 0.01).name('Mist');
 gui.add(params, 'seed', 1, 999999, 1).name('Seed');
 gui.add(params, 'regenerate').name('Regenerate world');
+params.viewPrideRock = () => {
+  const [px, pz] = PATH_POINTS[PATH_POINTS.length - 1];
+  camera.position.set(px - 6, heightFn(px - 6, pz + 14) + 1.75, pz + 14);
+  controls.target.set(PR.x - 10, savPlainH + 30, PR.z);
+  controls.update(); lastInteraction = performance.now();
+};
+gui.add(params, 'viewPrideRock').name('View: Pride Rock');
 if (gtaoPass) gui.add(params, 'ao').name('Ambient occlusion').onChange(v => { gtaoPass.enabled = v; });
 gui.add(params, 'godRays', 0, 1.5, 0.01).name('God rays');
 gui.add(params, 'bloom', 0, 1, 0.01).name('Bloom').onChange(v => { bloomPass.strength = v; });
@@ -2311,7 +2648,7 @@ function updateSun(){
   const gloom = 1 - weather.cur.dark * 0.55;
   U.uHorizonColor.value.setRGB(hz[0] * gloom + 0.012 * (1 - day), hz[1] * gloom + 0.02 * (1 - day), hz[2] * gloom + 0.045 * (1 - day));
   /* damp forest air is a little green; overcast greys it */
-  U.uHorizonColor.value.lerp(_col.setRGB(0.36, 0.42, 0.36).multiplyScalar(U.uHorizonColor.value.r + U.uHorizonColor.value.g + U.uHorizonColor.value.b).multiplyScalar(0.33), 0.25 + weather.cur.cover * 0.3);
+  U.uHorizonColor.value.lerp(_col.setRGB(0.36, 0.42, 0.36).multiplyScalar(U.uHorizonColor.value.r + U.uHorizonColor.value.g + U.uHorizonColor.value.b).multiplyScalar(0.33), 0.12 + weather.cur.cover * 0.3);
   U.uSunHazeColor.value.setRGB(sw[0] * gloom + 0.012 * (1 - day), sw[1] * gloom + 0.02 * (1 - day), sw[2] * gloom + 0.045 * (1 - day));
   const dawnMist = Math.exp(-Math.pow((t - 6.9) / 1.3, 2)) * 0.30 * (1 - weather.cur.cover * 0.5);
   U.uFogDensity.value = 0.00055 + weather.cur.cover * 0.0008 + weather.cur.rain * 0.0020 + params.mist * 0.0022;
@@ -2439,6 +2776,7 @@ weather.set('Clear');
     controls.update();
     lastInteraction = 1e15;
   }
+  if (qp.has('pride')){ params.viewPrideRock(); lastInteraction = 1e15; }
   if (qp.has('tod')) params.timeOfDay = +qp.get('tod');
   if (qp.has('mist')) params.mist = +qp.get('mist');
   if (qp.has('w')){ const n = qp.get('w'); params.autoCycle = false; weather.cur = { ...WEATHER[n] }; weather.from = { ...weather.cur }; weather.to = WEATHER[n]; weather.t = 1; }
